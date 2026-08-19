@@ -1,0 +1,4 @@
+arm,documents,exceptions,resolved,resolved_rate,ci_low,ci_high,llm_requests,total_tokens,escalated,requests_per_resolution
+all_deterministic,2138,200,40,0.2,0.1505,0.2609,0,0,160,0.0
+all_agentic,0,200,67,0.335,0.2732,0.403,554,0,133,8.269
+tiered,2138,200,107,0.535,0.4659,0.6028,514,0,93,4.804

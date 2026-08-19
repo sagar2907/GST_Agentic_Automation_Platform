@@ -1,0 +1,5 @@
+{
+  "cases": 0,
+  "repeats": 0,
+  "note": "not measured: the offline provider is genuinely deterministic, so measuring its run-to-run variance would report zero and say nothing about a real model."
+}

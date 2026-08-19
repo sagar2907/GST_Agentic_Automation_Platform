@@ -1,0 +1,109 @@
+{
+  "cases": 4,
+  "repeats": 3,
+  "unstable_outcome": 1,
+  "unstable_outcome_rate": 0.25,
+  "unstable_probe_path": 3,
+  "unstable_probe_path_rate": 0.75,
+  "unstable_action": 2,
+  "unstable_action_rate": 0.5,
+  "per_case": {
+    "E00001-X140P": {
+      "resolved": [
+        true,
+        true,
+        true
+      ],
+      "paths": [
+        [
+          "compute_tolerance_match"
+        ],
+        [
+          "compute_tolerance_match"
+        ],
+        [
+          "compute_tolerance_match"
+        ]
+      ],
+      "actions": [
+        "ACCEPT",
+        "REJECT",
+        "ACCEPT"
+      ]
+    },
+    "E00002-X141P": {
+      "resolved": [
+        true,
+        true,
+        false
+      ],
+      "paths": [
+        [
+          "check_irn_status",
+          "compute_tolerance_match"
+        ],
+        [
+          "check_irn_status",
+          "query_vendor_master"
+        ],
+        [
+          "check_irn_status",
+          "query_vendor_master"
+        ]
+      ],
+      "actions": [
+        "REJECT",
+        "REJECT",
+        "NONE"
+      ]
+    },
+    "E00003-X142P": {
+      "resolved": [
+        true,
+        true,
+        true
+      ],
+      "paths": [
+        [
+          "check_irn_status"
+        ],
+        [
+          "check_irn_status",
+          "query_vendor_master"
+        ],
+        [
+          "check_irn_status",
+          "compute_tolerance_match"
+        ]
+      ],
+      "actions": [
+        "REJECT",
+        "REJECT",
+        "REJECT"
+      ]
+    },
+    "E00004-X143P": {
+      "resolved": [
+        true,
+        true,
+        true
+      ],
+      "paths": [
+        [
+          "check_irn_status"
+        ],
+        [
+          "compute_tolerance_match"
+        ],
+        [
+          "compute_tolerance_match"
+        ]
+      ],
+      "actions": [
+        "REJECT",
+        "REJECT",
+        "REJECT"
+      ]
+    }
+  }
+}
