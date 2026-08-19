@@ -1,0 +1,22 @@
+name: ci
+
+# The whole suite runs offline against a deterministic provider, so CI needs
+# no secrets and no database. That is a design constraint, not a convenience:
+# a suite that needed an API key could not run here at all.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q

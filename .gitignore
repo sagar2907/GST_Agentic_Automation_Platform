@@ -1,0 +1,39 @@
+# Secrets — never commit. This file exists before .env is created, by design.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Local state
+*.log
+.dbos/
+postgres-data/
+
+# Test and tool caches
+.hypothesis/
+
+# Cached provider responses. Not committed: the cache is keyed on the exact
+# request, so it accumulates entries for every prompt revision the project has
+# ever issued, and publishing it would amount to publishing a changelog of the
+# prompts rather than the finished ones. The offline suite and every offline
+# experiment reproduce without it; live figures are published as results/.
+data/llm_cache/
+
+scratch/
+*.tmp
