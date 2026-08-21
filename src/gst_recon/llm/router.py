@@ -41,10 +41,20 @@ DEFAULT_REQUESTS_PER_MINUTE = 15
 
 @dataclass(slots=True)
 class Shard:
-    """One model's independent quota bucket."""
+    """One model's independent quota bucket.
+
+    ``priority`` orders the fallback chain: lower is preferred, and shards
+    sharing a priority are round-robined between each other. This exists
+    because a locally served model is not a peer of a hosted one. It is one to
+    two orders of magnitude slower, so round-robining it into the rotation
+    would hand it a fixed share of ordinary traffic and drag every cycle down.
+    It belongs at the bottom of the chain as the floor that cannot rate-limit
+    you, reached only when the hosted tiers are exhausted.
+    """
 
     provider: object
     requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE
+    priority: int = 0
     recent: deque[float] = field(default_factory=deque)
     served: int = 0
     rejected: int = 0
@@ -131,10 +141,16 @@ class Router:
         self._cursor = 0
 
     def _ordered_shards(self) -> list[Shard]:
-        """Round-robin start point, so load spreads instead of hammering one."""
-        order = self.shards[self._cursor :] + self.shards[: self._cursor]
+        """Priority tiers first, round-robin within each tier.
+
+        Rotating the start point spreads load across equal-priority shards so
+        no single quota bucket is hammered while others idle. Sorting by
+        priority first keeps the chain a chain: a slow local floor is only
+        reached once everything above it is saturated.
+        """
+        rotated = self.shards[self._cursor :] + self.shards[: self._cursor]
         self._cursor = (self._cursor + 1) % len(self.shards)
-        return order
+        return sorted(rotated, key=lambda shard: shard.priority)
 
     def generate(
         self,
