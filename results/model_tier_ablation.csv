@@ -1,0 +1,4 @@
+tier,model,where_usable,cases,resolved,resolved_rate,resolved_ci_low,resolved_ci_high,class_correct,class_accuracy,class_ci_low,fully_grounded,grounded_rate,grounded_ci_low,mean_tokens,mean_seconds,latency_from_n_fresh_runs,mean_probes,repairs_needed
+A,gemini-3.5-flash-lite,hosted free tier; synthetic and sandbox data only,12,12,1.0,0.7575,1.0,12,1.0,0.7575,11,0.9167,0.6461,2998.9,20.32,12,1.33,0
+B,llama3.1:8b,local 8B Q4_K_M; permitted on real client data,12,5,0.4167,0.1933,0.6805,5,1.0,0.5655,5,1.0,0.5655,5791.5,47.86,12,3.42,9
+C,llama3.2:3b,local 3B Q4_K_M; real client data on constrained hardware,12,12,1.0,0.7575,1.0,12,1.0,0.7575,12,1.0,0.7575,2720.2,5.77,12,1.0,12

@@ -525,7 +525,44 @@ retrieved precedent *shortens* the investigation depends on the model reading
 it, and the offline provider ignores the hint — so mean probes is reported as
 `None` offline rather than as a flat line implying memory does nothing.
 
-## 6.5 Provider limits, measured
+## 6.5 Model tiers: what privacy actually costs
+
+Twelve hard cases, identical across tiers, every arm run fresh with the response
+cache bypassed.
+
+| Tier | Model | Resolved | Class acc | Grounded | Tokens | Secs | Probes | Repairs |
+|---|---|---|---|---|---|---|---|---|
+| A | `gemini-3.5-flash-lite` (hosted) | 12/12 | 1.000 | 0.917 | 2,999 | 20.3 | 1.33 | 0 |
+| B | `llama3.1:8b` (local) | **5/12** | 1.000 | 1.000 | 5,792 | 47.9 | 3.42 | 9 |
+| C | `llama3.2:3b` (local) | 12/12 | 1.000 | **1.000** | 2,720 | **5.8** | 1.00 | 12 |
+
+**On this task, privacy costs approximately nothing.** The 3B local model matches
+the hosted model's resolution rate and class accuracy, beats it on evidence
+groundedness, and answers in under a third of the time. A practitioner who will
+not let data leave their premises can run this workload locally.
+
+**Bigger is worse here.** The 8B resolved 5 of 12 where the 3B resolved 12, and
+the intervals do not overlap ([0.193, 0.681] against [0.758, 1.0]). It also spent
+twice the tokens, 3.4x the probes and 8x the wall clock. This is a real,
+significant, and counterintuitive result -- and it is a result about *this
+harness with this prompt*, not a general claim about 8B models.
+
+**The repair step is what makes the local tier viable at all.** Every one of the
+3B's twelve runs needed it. Without grammar-constrained decoding the 3B resolves
+0/12: it reasons correctly and then emits fenced markdown wrapping a schema it
+invented. Measured before the fix, that looked exactly like a capability failure.
+
+**Groundedness is the metric that matters, and the hosted model scores lowest.**
+One of twelve hosted findings cited a figure its tool never returned. Both local
+tiers cited nothing they had not been given. A Finding with valid JSON, a real
+tool-call id and an invented number passes every other check in this system.
+
+At n=12 the intervals are wide and none of the quality differences except the
+8B's are individually significant. The deployment recommendation -- run Tier C
+locally for real client data -- rests on the 3B matching rather than beating the
+hosted tier, which is the weaker and safer claim.
+
+## 6.6 Provider limits, measured
 
 | Limit | Value | Evidence |
 |---|---|---|
@@ -547,7 +584,7 @@ Model selection on a realistic 7,459-token tool-calling payload:
 | `gemini-3.6-flash` | 67 s | Excluded — emitted no tool call |
 | `gemini-2.5-flash` | — | Excluded — 404, withdrawn for new keys |
 
-## 6.6 Durable execution
+## 6.7 Durable execution
 
 Killing the process mid-workflow with `os._exit(9)`, then resuming:
 

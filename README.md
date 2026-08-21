@@ -27,14 +27,17 @@ Those get agents. The boundary between them is measured, not asserted.
 | Tier 2 investigation agent, bounded | Working | Live run resolves cases with tool-referenced evidence |
 | Precedent memory (in-memory + pgvector) | Working | Verified against Postgres 16 / pgvector 0.8.6 |
 | Tier 3 recovery agent | Working, simulated | Injection tests; no live email integration |
+| Local model tier (Ollama) | Working | Fallback-chain floor; §6.7 ablation across three tiers |
 | Durable workflow semantics | Verified | Crash/resume measured directly (see below) |
 
 ### Not done, and why
 
-- **No live GSTN integration.** Sandbox access runs through a licensed GSP and
-  requires business onboarding I could not verify as freely available. The GSTN
-  client is defined behind an interface with a fake conforming to the published
-  API shapes. Nothing in this repository has ever talked to GSTN.
+- **No GSTN client at all.** There is no `gstn/` module. Sandbox access runs
+  through a licensed GSP and needs a developer registration this build never
+  made, so the client, the auth flow and the idempotent submit are unwritten --
+  not stubbed, absent. Nothing here has ever talked to GSTN, and until that
+  module exists the exactly-once submission property is a property of the
+  workflow engine rather than of this system.
 - **No real taxpayer data, ever.** Everything is seeded synthetic data. The
   free-tier provider terms state that prompts may be used to improve their
   products, so this stack **must not** be pointed at a real purchase register.
@@ -42,8 +45,12 @@ Those get agents. The boundary between them is measured, not asserted.
   The offline provider is scripted, so quality figures measured against it are
   circular — the harness refuses to produce them (see *Two results I threw
   away*).
-- **No React UI.** No Node toolchain on the build machine; the CLI and the
-  measured results are the interface. This was a scope call, not an oversight.
+- **No React UI, and no review queue.** No Node toolchain on the build machine.
+  A server-rendered dashboard needs none and is not written either, which
+  matters more than the framework choice: the human gate is load-bearing, and
+  right now the only way to work the queue is the CLI.
+- **Five modules from the intended layout are missing**: `ingest`, `gstn`,
+  `workflow`, `audit`, `api`. `tests/integration` and `tests/chaos` are empty.
 - **Per-class F1 is not reported.** At the sample sizes here a nine-way split
   gives roughly ±19% intervals, which is noise. Reporting it would imply
   precision the data does not support.
@@ -120,6 +127,43 @@ agent is not stable. Two consequences:
 - **The human gate is load-bearing, not defence in depth.** Every reject and
   every accept above the value ceiling requires a human. Against an agent that
   answers both ways to the same question, that gate is the control.
+
+### Model tiers: what privacy actually costs
+
+Twelve hard cases, identical across tiers, every arm run fresh with the response
+cache bypassed.
+
+| Tier | Model | Resolved | Class acc | Grounded | Tokens | Secs | Probes | Repairs |
+|---|---|---|---|---|---|---|---|---|
+| A | `gemini-3.5-flash-lite` (hosted) | 12/12 | 1.000 | 0.917 | 2,999 | 20.3 | 1.33 | 0 |
+| B | `llama3.1:8b` (local) | **5/12** | 1.000 | 1.000 | 5,792 | 47.9 | 3.42 | 9 |
+| C | `llama3.2:3b` (local) | 12/12 | 1.000 | **1.000** | 2,720 | **5.8** | 1.00 | 12 |
+
+**On this task, privacy costs approximately nothing.** The 3B local model matches
+the hosted model's resolution rate and class accuracy, beats it on evidence
+groundedness, and answers in under a third of the time. A practitioner who will
+not let data leave their premises can run this workload locally.
+
+**Bigger is worse here.** The 8B resolved 5 of 12 where the 3B resolved 12, and
+the intervals do not overlap ([0.193, 0.681] against [0.758, 1.0]). It also spent
+twice the tokens, 3.4x the probes and 8x the wall clock. This is a real,
+significant, and counterintuitive result -- and it is a result about *this
+harness with this prompt*, not a general claim about 8B models.
+
+**The repair step is what makes the local tier viable at all.** Every one of the
+3B's twelve runs needed it. Without grammar-constrained decoding the 3B resolves
+0/12: it reasons correctly and then emits fenced markdown wrapping a schema it
+invented. Measured before the fix, that looked exactly like a capability failure.
+
+**Groundedness is the metric that matters, and the hosted model scores lowest.**
+One of twelve hosted findings cited a figure its tool never returned. Both local
+tiers cited nothing they had not been given. A Finding with valid JSON, a real
+tool-call id and an invented number passes every other check in this system.
+
+At n=12 the intervals are wide and none of the quality differences except the
+8B's are individually significant. The deployment recommendation -- run Tier C
+locally for real client data -- rests on the 3B matching rather than beating the
+hosted tier, which is the weaker and safer claim.
 
 ### Measured provider limits
 
