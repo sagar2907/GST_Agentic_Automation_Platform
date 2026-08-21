@@ -91,6 +91,9 @@ def command_investigate(args: argparse.Namespace) -> int:
             print("no provider credentials found in .env; refusing to run live", file=sys.stderr)
             return 2
         print(f"credentials loaded: {', '.join(loaded)}")
+    elif args.mode == "local":
+        # Nothing leaves the machine, so nothing needs a credential.
+        print("local mode: no credentials required, no request leaves this machine")
 
     dataset = _cycle(args.seed, 120, HARD_MIX)
     result = reconcile(
@@ -136,6 +139,83 @@ def command_investigate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ablation(experiments, _args: argparse.Namespace, suffix: str) -> None:
+    rows = [arm.as_row() for arm in experiments.tiering_ablation()]
+    print(f"wrote {experiments.write_csv(f'tiering_ablation{suffix}', rows)}")
+    for row in rows:
+        print(
+            f"  {row['arm']:20} resolved {row['resolved']:>4}/{row['exceptions']:<4} "
+            f"[{row['ci_low']:.1%}, {row['ci_high']:.1%}]  requests {row['llm_requests']:>5}  "
+            f"per resolution {row['requests_per_resolution']}"
+        )
+
+
+def _run_budget(experiments, _args: argparse.Namespace, suffix: str) -> None:
+    rows = experiments.step_budget_curve()
+    print(f"wrote {experiments.write_csv(f'step_budget_curve{suffix}', rows)}")
+    for row in rows:
+        print(
+            f"  budget {row['budget']:>2}  resolved {row['successes']:>3}/{row['trials']:<3} "
+            f"[{row['ci_low']:.3f}, {row['ci_high']:.3f}]  probes {row['probes_spent']}"
+        )
+
+
+def _run_memory(experiments, args: argparse.Namespace, suffix: str) -> None:
+    rows = experiments.memory_curve(cycles=args.cycles)
+    print(f"wrote {experiments.write_csv(f'memory_curve{suffix}', rows)}")
+    for row in rows:
+        print(
+            f"  cycle {row['cycle']}  precedents {row['precedents_available']:>4}  "
+            f"hit rate {row['precedent_hit_rate']}  mean probes {row['mean_probes']}"
+        )
+
+
+def _run_quality(experiments, args: argparse.Namespace, _suffix: str) -> None:
+    if args.mode != "live":
+        print("  quality metrics need a live provider; skipping")
+        return
+    scores = experiments.trajectory_scores(limit=args.cases)
+    print(f"wrote {experiments.write_json('trajectory_scores_live', scores)}")
+    print(json.dumps(scores, indent=2))
+    print(
+        f"wrote {experiments.write_csv('stp_curve_live', experiments.stp_curve(limit=args.cases))}"
+    )
+
+
+def _run_tiers(experiments, args: argparse.Namespace, _suffix: str) -> None:
+    rows, skipped = experiments.model_tier_ablation(cases=args.cases)
+    payload = [row.as_row() for row in rows]
+    if payload:
+        print(f"wrote {experiments.write_csv('model_tier_ablation', payload)}")
+    for row in payload:
+        print(
+            f"  tier {row['tier']} {row['model']:20} "
+            f"resolved {row['resolved']:>3}/{row['cases']:<3} "
+            f"class-acc {row['class_accuracy']}  grounded {row['grounded_rate']}  "
+            f"tok {row['mean_tokens']}  {row['mean_seconds']}s"
+        )
+    for entry in skipped:
+        print(f"  tier {entry['tier']} {entry['model']:20} SKIPPED: {entry['reason'][:70]}")
+
+
+def _run_consistency(experiments, args: argparse.Namespace, suffix: str) -> None:
+    payload = experiments.consistency(cases=args.cases, repeats=args.repeats)
+    print(f"wrote {experiments.write_json(f'consistency{suffix}', payload)}")
+    print(json.dumps({k: v for k, v in payload.items() if k != "per_case"}, indent=2))
+
+
+# Dispatch table rather than a branch chain: adding an experiment should not
+# make this function harder to read, and each entry is independently testable.
+EXPERIMENTS = {
+    "ablation": _run_ablation,
+    "budget": _run_budget,
+    "memory": _run_memory,
+    "quality": _run_quality,
+    "tiers": _run_tiers,
+    "consistency": _run_consistency,
+}
+
+
 def command_experiment(args: argparse.Namespace) -> int:
     from gst_recon.experiments.harness import Experiments  # noqa: PLC0415 -- heavy import
 
@@ -147,49 +227,11 @@ def command_experiment(args: argparse.Namespace) -> int:
             return 2
 
     experiments = Experiments(settings, mode=args.mode, results_dir=settings.results_dir)
-    suffix = "" if args.mode == "fake" else "_live"
-
-    if args.which in ("ablation", "all"):
-        rows = [arm.as_row() for arm in experiments.tiering_ablation()]
-        path = experiments.write_csv(f"tiering_ablation{suffix}", rows)
-        print(f"wrote {path}")
-        for row in rows:
-            print(
-                f"  {row['arm']:20} resolved {row['resolved']:>4}/{row['exceptions']:<4} "
-                f"[{row['ci_low']:.1%}, {row['ci_high']:.1%}]  requests {row['llm_requests']:>5}  "
-                f"per resolution {row['requests_per_resolution']}"
-            )
-
-    if args.which in ("budget", "all"):
-        rows = experiments.step_budget_curve()
-        print(f"wrote {experiments.write_csv(f'step_budget_curve{suffix}', rows)}")
-        for row in rows:
-            print(
-                f"  budget {row['budget']:>2}  resolved {row['successes']:>3}/{row['trials']:<3} "
-                f"[{row['ci_low']:.3f}, {row['ci_high']:.3f}]  probes {row['probes_spent']}"
-            )
-
-    if args.which in ("memory", "all"):
-        rows = experiments.memory_curve(cycles=args.cycles)
-        print(f"wrote {experiments.write_csv(f'memory_curve{suffix}', rows)}")
-        for row in rows:
-            print(
-                f"  cycle {row['cycle']}  precedents {row['precedents_available']:>4}  "
-                f"hit rate {row['precedent_hit_rate']}  mean probes {row['mean_probes']}"
-            )
-
-    if args.which in ("quality", "all") and args.mode == "live":
-        scores = experiments.trajectory_scores(limit=args.cases)
-        print(f"wrote {experiments.write_json('trajectory_scores_live', scores)}")
-        print(json.dumps(scores, indent=2))
-        rows = experiments.stp_curve(limit=args.cases)
-        print(f"wrote {experiments.write_csv('stp_curve_live', rows)}")
-
-    if args.which in ("consistency", "all"):
-        payload = experiments.consistency(cases=args.cases, repeats=args.repeats)
-        print(f"wrote {experiments.write_json(f'consistency{suffix}', payload)}")
-        print(json.dumps({k: v for k, v in payload.items() if k != "per_case"}, indent=2))
-
+    suffix = "" if args.mode == "fake" else f"_{args.mode}"
+    selected = EXPERIMENTS if args.which == "all" else {args.which: EXPERIMENTS[args.which]}
+    for name, runner in selected.items():
+        print(f"--- {name} ---")
+        runner(experiments, args, suffix)
     return 0
 
 
@@ -205,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     recon.set_defaults(func=command_reconcile)
 
     agent = sub.add_parser("investigate", help="route hard exceptions through Tier 2")
-    agent.add_argument("--mode", choices=("fake", "live"), default="fake")
+    agent.add_argument("--mode", choices=("fake", "live", "local"), default="fake")
     agent.add_argument("--seed", type=int, default=4242)
     agent.add_argument("--limit", type=int, default=6)
     agent.add_argument("--max-steps", type=int, default=6)
@@ -215,11 +257,11 @@ def main(argv: list[str] | None = None) -> int:
     exp = sub.add_parser("experiment", help="run an experiment and write results/")
     exp.add_argument(
         "which",
-        choices=("ablation", "budget", "memory", "consistency", "all"),
+        choices=(*EXPERIMENTS.keys(), "all"),
         default="all",
         nargs="?",
     )
-    exp.add_argument("--mode", choices=("fake", "live"), default="fake")
+    exp.add_argument("--mode", choices=("fake", "live", "local"), default="fake")
     exp.add_argument("--cycles", type=int, default=3)
     exp.add_argument("--cases", type=int, default=8)
     exp.add_argument("--repeats", type=int, default=3)

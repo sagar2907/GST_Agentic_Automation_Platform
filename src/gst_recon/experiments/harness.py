@@ -29,8 +29,9 @@ from gst_recon.agents.tools import ToolSurface
 from gst_recon.config import AgentBudgets, Settings
 from gst_recon.data.generator import DISTRIBUTION_MIX, HARD_MIX, Dataset, generate
 from gst_recon.domain.taxonomy import DEFAULT_ROUTING, ExceptionClass, ImsAction, Tier
+from gst_recon.experiments.model_tiers import TierResult, summarise_tier
 from gst_recon.experiments.stats import Proportion, mean_or_none, wilson
-from gst_recon.llm import REFERENCE_PROBES, build_router
+from gst_recon.llm import MODEL_TIERS, REFERENCE_PROBES, build_router
 from gst_recon.llm.router import Router
 from gst_recon.matching.engine import ReconciliationResult, reconcile
 from gst_recon.memory import InMemoryPrecedentStore, Precedent
@@ -503,6 +504,53 @@ class Experiments:
                 for case_id, values in outcomes.items()
             },
         }
+
+    # --- 6.7 model-tier ablation -------------------------------------------
+
+    def model_tier_ablation(self, *, cases: int = 12, tiers: tuple[str, ...] = ("A", "B", "C")):
+        """Run the same cases through hosted and locally-served models.
+
+        Every tier sees an identical case set, so any difference is the model
+        rather than the workload. Tiers whose model is not available on this
+        machine are skipped with a reason rather than silently omitted -- an
+        absent row and a failed row mean very different things.
+        """
+        dataset = self._cycle(4242, 120, HARD_MIX)
+        result = self._reconcile(dataset)
+        selected = result.exceptions[:cases]
+        truth = dataset.truth_by_key
+        expected: dict[str, str] = {}
+        for exception in selected:
+            key = next((k for k in truth if k in exception.exception_id), None)
+            if key is not None:
+                expected[exception.exception_id] = truth[key].exception_class.value
+
+        rows: list[TierResult] = []
+        skipped: list[dict[str, str]] = []
+        for tier in tiers:
+            model, kind, where = MODEL_TIERS[tier]
+            try:
+                router = (
+                    build_router(self.settings.cache_dir, mode="local", local_model=model)
+                    if kind == "local"
+                    else build_router(self.settings.cache_dir, mode="live", models=(model,))
+                )
+            except ValueError as exc:
+                skipped.append({"tier": tier, "model": model, "reason": str(exc)})
+                continue
+
+            # Every tier runs fresh. With the cache on, a tier whose responses
+            # happen to be cached from earlier work replays in milliseconds
+            # while a newly-added tier runs for real, and the resulting
+            # "latency" column compares cache lookups against inference.
+            router.bypass_cache = True
+            surface = ToolSurface(dataset, self.settings.tolerances)
+            trajectories = [
+                investigate(exception, surface, router, AgentBudgets(max_steps=MAX_BUDGET))
+                for exception in selected
+            ]
+            rows.append(summarise_tier(tier, model, where, trajectories, expected))
+        return rows, skipped
 
     # --- reporting ---------------------------------------------------------
 
