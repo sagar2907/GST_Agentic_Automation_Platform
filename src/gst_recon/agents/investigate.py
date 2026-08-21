@@ -65,6 +65,32 @@ probes do not settle the question, say so with PENDING and low confidence."""
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# The Finding shape, expressed as a schema so a provider that supports
+# constrained decoding can be held to it. Used only as a repair step: a model
+# that already answers in the right shape never sees it.
+FINDING_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "proposed_class": {"type": "string", "enum": [c.value for c in ExceptionClass]},
+        "proposed_action": {"type": "string", "enum": [a.value for a in ImsAction]},
+        "confidence": {"type": "number"},
+        "rationale": {"type": "string"},
+        "evidence": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tool_call_id": {"type": "string"},
+                    "tool_name": {"type": "string"},
+                    "claim": {"type": "string"},
+                },
+                "required": ["tool_call_id", "tool_name", "claim"],
+            },
+        },
+    },
+    "required": ["proposed_class", "proposed_action", "confidence", "rationale", "evidence"],
+}
+
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryStep:
@@ -167,6 +193,41 @@ def _parse_finding(
     )
 
 
+def _repair_finding(
+    trajectory: Trajectory,
+    exception: ExceptionRecord,
+    messages: list[Message],
+    unparseable: str,
+    router: Router,
+) -> tuple[Finding | None, str]:
+    """Re-ask for the verdict once, under a schema constraint.
+
+    A small locally-served model frequently reasons its way to the right
+    verdict and then renders it in a shape of its own invention -- fenced
+    markdown wrapping invented keys. Discarding the whole investigation over
+    that would misreport a formatting failure as a reasoning failure, and in
+    measurements comparing a hosted model against a local one it would show up
+    as a capability gap that is not there.
+
+    Constrained decoding separates the two. Providers that already answer in
+    shape never reach this branch, so it costs the hosted path nothing.
+    """
+    repaired = router.generate(
+        [*messages, Message(Role.ASSISTANT, unparseable)],
+        [],
+        GenerationConfig(max_output_tokens=700, json_schema=FINDING_SCHEMA),
+    )
+    trajectory.usage = trajectory.usage + repaired.usage
+    trajectory.live_requests += 0 if repaired.from_cache else 1
+    trajectory.cached_requests += 1 if repaired.from_cache else 0
+    return _parse_finding(
+        repaired.text,
+        exception,
+        {step.call_id for step in trajectory.steps},
+        len(trajectory.steps),
+    )
+
+
 def _describe(exception: ExceptionRecord) -> str:
     lines = [
         f"Exception {exception.exception_id} classified by rules as "
@@ -238,6 +299,10 @@ def investigate(
                 {step.call_id for step in trajectory.steps},
                 len(trajectory.steps),
             )
+            if finding is None:
+                finding, why = _repair_finding(
+                    trajectory, exception, messages, response.text, router
+                )
             if finding is None:
                 trajectory.terminated_because = f"invalid_finding: {why}"
             else:
