@@ -3,7 +3,9 @@
 Two commands. ``reconcile`` runs Tier 1 over a generated cycle and reports the
 match rates and the exception taxonomy; it needs no model and no key.
 ``investigate`` routes the hard residue through the Tier 2 agent, offline by
-default and against live providers only when explicitly asked.
+default and against live providers only when explicitly asked. ``ingest`` reads
+a real register file and reports what it made of it. ``cycle`` runs the whole
+thing end to end.
 """
 
 from __future__ import annotations
@@ -263,6 +265,49 @@ EXPERIMENTS = {
 }
 
 
+def command_ingest(args: argparse.Namespace) -> int:
+    """Read a register file and report what was made of it.
+
+    Prints before it decides. Someone handed a spreadsheet by a client needs to
+    see which column was read as what, and which rows were dropped and why,
+    before any of it reaches a reconciliation -- the mapping being wrong is far
+    likelier than the arithmetic being wrong, and far quieter.
+    """
+    from gst_recon.ingest import coerce  # noqa: PLC0415 -- only this command needs it
+    from gst_recon.ingest.loader import IngestRefusedError, load_purchase_register  # noqa: PLC0415
+
+    order = coerce.DateOrder(args.date_order) if args.date_order else None
+    try:
+        report = load_purchase_register(args.path, sheet_name=args.sheet or None, date_order=order)
+    except IngestRefusedError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+    print(report.summary())
+    print()
+    print("columns read")
+    for name, index in sorted(report.mapping.columns.items(), key=lambda item: item[1]):
+        print(f"  {index:>3}  {name}")
+    for index, reason in sorted(report.mapping.ignored.items()):
+        print(f"  {index:>3}  (ignored: {reason})")
+    for index, heading in sorted(report.mapping.unrecognised.items()):
+        print(f"  {index:>3}  (not recognised: {heading})")
+
+    if report.rejected:
+        print()
+        print(f"rejected rows ({len(report.rejected)})")
+        for rejection in report.rejected[: args.show_rejected]:
+            print(f"  row {rejection.row}: {rejection.reason}")
+        remaining = len(report.rejected) - args.show_rejected
+        if remaining > 0:
+            print(f"  ... and {remaining} more")
+
+    # A register that lost rows is a register that will look reconciled while
+    # being incomplete, and an unactioned document is treated as accepted at
+    # the cut-off. That is worth a non-zero exit, not a line of output.
+    return 1 if report.rejected else 0
+
+
 def command_experiment(args: argparse.Namespace) -> int:
     from gst_recon.experiments.harness import Experiments  # noqa: PLC0415 -- heavy import
 
@@ -309,6 +354,18 @@ def main(argv: list[str] | None = None) -> int:
     cyc.add_argument("--as-of", default="2026-07-10")
     cyc.add_argument("--audit-out", default="")
     cyc.set_defaults(func=command_cycle)
+
+    ing = sub.add_parser("ingest", help="read a purchase register and report what was read")
+    ing.add_argument("path", help="an .xlsx or .csv purchase register")
+    ing.add_argument("--sheet", default="", help="worksheet name; defaults to the first")
+    ing.add_argument(
+        "--date-order",
+        choices=("DAY_FIRST", "MONTH_FIRST"),
+        default="",
+        help="assert the date convention for a file whose own dates cannot settle it",
+    )
+    ing.add_argument("--show-rejected", type=int, default=20)
+    ing.set_defaults(func=command_ingest)
 
     exp = sub.add_parser("experiment", help="run an experiment and write results/")
     exp.add_argument(
