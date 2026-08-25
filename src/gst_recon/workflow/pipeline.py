@@ -30,7 +30,7 @@ from gst_recon.agents.investigate import investigate
 from gst_recon.agents.tools import ToolSurface
 from gst_recon.audit import AuditLog, prompt_hash
 from gst_recon.config import Settings
-from gst_recon.domain.records import ExceptionRecord
+from gst_recon.domain.records import ExceptionRecord, Finding
 from gst_recon.domain.taxonomy import DEFAULT_ROUTING, ImsAction, Tier
 from gst_recon.gstn import ImsSubmission, SubmitOutcome, SubmitResult
 from gst_recon.llm.router import Router
@@ -41,6 +41,23 @@ from gst_recon.policy.gate import Decision, days_to_cutoff, decide
 # submitted: PENDING is the absence of a decision, and NO_ACTION is what
 # happens when nobody acts at all.
 SUBMITTABLE = (ImsAction.ACCEPT, ImsAction.REJECT)
+
+
+@dataclass(frozen=True, slots=True)
+class HumanGated:
+    """A case the gate handed to a person, with what they need to judge it.
+
+    Carried out of the cycle rather than reconstructed later. The finding and
+    the audit sequence are what bind a reviewer's approval to the specific
+    proposal they were shown, and re-deriving them from the log afterwards
+    would mean re-running the agent -- which, given the instability
+    measurement, would not reproduce the same proposal anyway.
+    """
+
+    exception: ExceptionRecord
+    finding: Finding | None
+    decision: Decision
+    audit_sequence: int
 
 
 @dataclass(slots=True)
@@ -58,6 +75,7 @@ class CycleOutcome:
     days_to_cutoff: int
     audit: AuditLog = field(default_factory=AuditLog)
     decisions: list[Decision] = field(default_factory=list)
+    gated: list[HumanGated] = field(default_factory=list)
     submissions: list[SubmitResult] = field(default_factory=list)
 
     @property
@@ -142,7 +160,7 @@ def run_cycle(
         # Recorded before anything is submitted. A crash after this point
         # leaves a decision with an unknown portal outcome, which is
         # discoverable; a crash before it would leave the reverse.
-        outcome.audit.append(
+        entry = outcome.audit.append(
             exception_id=exception.exception_id,
             action=decision.action.value,
             requires_human=decision.requires_human,
@@ -161,6 +179,7 @@ def run_cycle(
 
         if decision.requires_human:
             outcome.queued_for_human += 1
+            outcome.gated.append(HumanGated(exception, finding, decision, entry.sequence))
             continue
         if decision.action not in SUBMITTABLE:
             continue
