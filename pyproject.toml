@@ -58,10 +58,14 @@ ignore = ["PLR0913", "PLR2004"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
 markers = [
     "live: hits a real provider API; deselected by default via 'make test'",
+    "chaos: kills a real process and needs Postgres; deselected by default",
 ]
+# The default suite is offline and dependency-free by design. Chaos tests are
+# the only ones needing a database, and a suite that cannot run from a clean
+# clone is a suite that quietly stops being run.
+addopts = "-q --strict-markers -m 'not chaos'"
 
 [tool.mypy]
 python_version = "3.12"
