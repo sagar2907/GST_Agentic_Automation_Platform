@@ -5,7 +5,8 @@ match rates and the exception taxonomy; it needs no model and no key.
 ``investigate`` routes the hard residue through the Tier 2 agent, offline by
 default and against live providers only when explicitly asked. ``ingest`` reads
 a real register file and reports what it made of it. ``cycle`` runs the whole
-thing end to end.
+thing end to end, and ``serve`` puts the cases it held back in front of a
+person.
 """
 
 from __future__ import annotations
@@ -308,6 +309,51 @@ def command_ingest(args: argparse.Namespace) -> int:
     return 1 if report.rejected else 0
 
 
+def command_serve(args: argparse.Namespace) -> int:
+    """Run a cycle, then serve everything it held back for a person.
+
+    The queue is built from a cycle rather than from the audit log, because a
+    reviewer needs the finding and its cited evidence, and rebuilding those
+    from the log would mean re-running the agent -- which, on the instability
+    evidence, would not reproduce the same proposal anyway.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415 -- only this command needs it
+
+    import uvicorn  # noqa: PLC0415 -- a server import belongs to the server command
+
+    from gst_recon.api import create_app, queue_from_cycle  # noqa: PLC0415
+    from gst_recon.workflow import run_cycle  # noqa: PLC0415 -- pulls in the agent stack
+
+    settings = load_settings()
+    if args.mode == "live" and not load_provider_credentials():
+        print("no provider credentials found in .env; refusing to run live", file=sys.stderr)
+        return 2
+
+    dataset = _cycle(args.seed, args.clean_pairs, HARD_MIX)
+    client = FakeGspClient()
+    as_of = date.fromisoformat(args.as_of)
+    outcome = run_cycle(
+        dataset,
+        client,
+        build_router(settings.cache_dir, mode=args.mode),
+        settings,
+        as_of=as_of,
+        recorded_at=datetime(as_of.year, as_of.month, as_of.day, 9, 0, tzinfo=UTC),
+        limit=args.limit,
+    )
+    review = queue_from_cycle(
+        outcome,
+        client=client,
+        taxpayer_gstin=args.gstin,
+        ruleset_version=settings.policy.ruleset_version,
+    )
+
+    print(f"{len(review.pending())} cases awaiting review, {outcome.submitted} already submitted")
+    print(f"http://{args.host}:{args.port}/")
+    uvicorn.run(create_app(review), host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def command_experiment(args: argparse.Namespace) -> int:
     from gst_recon.experiments.harness import Experiments  # noqa: PLC0415 -- heavy import
 
@@ -366,6 +412,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     ing.add_argument("--show-rejected", type=int, default=20)
     ing.set_defaults(func=command_ingest)
+
+    srv = sub.add_parser("serve", help="serve the human review queue for one cycle")
+    srv.add_argument("--mode", choices=("fake", "live", "local"), default="fake")
+    srv.add_argument("--seed", type=int, default=4242)
+    srv.add_argument("--clean-pairs", type=int, default=120)
+    srv.add_argument("--limit", type=int, default=20)
+    srv.add_argument("--as-of", default="2026-07-10")
+    srv.add_argument("--gstin", default="27AAPFU0939F1ZV", help="the taxpayer's own GSTIN")
+    srv.add_argument("--host", default="127.0.0.1")
+    srv.add_argument("--port", type=int, default=8000)
+    srv.set_defaults(func=command_serve)
 
     exp = sub.add_parser("experiment", help="run an experiment and write results/")
     exp.add_argument(
