@@ -154,7 +154,7 @@ GSTR-2B / IMS ──────┘      normalise → exact → fuzzy → class
                            long-horizon, suspends between cycles
                                         │
                                         ▼
-                 policy gate → human queue → idempotent submit → audit
+              policy gate → human queue → audit → idempotent submit
 ```
 
 The governing rule, which is the single most important sentence in the design:
@@ -196,6 +196,23 @@ the recovery state machine.
 
 **`memory/`** — Resolved cases become retrievable precedents, so the agent
 consults prior work before investigating.
+
+**`audit/`** — Append-only and hash-chained. No update, no delete; a correction
+is a new entry pointing back at the one it supersedes, so what was believed
+over time survives rather than collapsing into what is believed now. Each entry
+carries the ruleset version, the model and a digest of the prompt, because "the
+agent said accept" cannot be reproduced and a prompt hash can.
+
+**`gstn/`** — The GSP client interface, a fake portal, and the submit path. The
+idempotency key is a hash of the decision content, not a generated token,
+because a retry needs to present the *same* key and a generated one would be
+different exactly when sameness matters.
+
+**`workflow/`** — The cycle as plain functions over plain data, so the whole
+thing runs offline with no database, no model and no portal — and a durable
+wrapper around it. Durability lives in one place. The agent loop inside a step
+stays a step rather than becoming a second layer checkpointing the same
+progress.
 
 **`experiments/`** — The ablation, the budget curve, the memory curve, and
 Wilson intervals.
@@ -595,13 +612,54 @@ That second property is *why* IMS submission needs an idempotency key. Measured,
 not assumed. Two incidental findings: post-crash status is `ENQUEUED`, not
 `PENDING`, and the workflow ledger lives in a separate `*_dbos_sys` database.
 
+## 6.8 Exactly-once submission, on the pipeline rather than in isolation
+
+The two facts above were measured against the engine. The idempotency key was
+tested against a fake portal. Both held, and the step from there to *this
+pipeline cannot double-submit* was still an argument rather than a measurement
+— which is exactly the shape of reasoning that has hidden every real bug in
+this project.
+
+So it is measured. A worker is killed with `os._exit(9)` partway through six
+documents — no exception, no unwinding, no chance to flush — and a fresh
+process resumes the workflow against the same Postgres.
+
+| Quantity | Result |
+|---|---|
+| Documents submitted | 6 |
+| Rows applied at the portal | **6** |
+| Documents applied twice | **0** |
+| Submit attempts | **7** |
+| Outcome of the seventh | `ALREADY_APPLIED` |
+
+Seven attempts for six documents is the finding, not an anomaly. Completed
+steps were memoised and did not re-run; the interrupted one did, presented the
+same derived key, and was answered as a replay. Had the key been generated per
+attempt it would have been a different key on the retry — different key, second
+action, and for a reject that means an invoice value purged from GSTR-2B twice
+in a period where it cannot be undone.
+
+The ordering inside the cycle carries the other half of the argument. The audit
+entry is written *before* the submit, so a crash between them leaves a recorded
+decision and an uncertain portal — a discrepancy a human can find. The reverse
+order loses the decision and leaves an action nobody can explain. Where a
+failure is unavoidable, choose the visible one.
+
 ---
 
 # Part 7 — Limitations
 
-**No live GSTN integration.** Sandbox access runs through a licensed GSP and
-requires business onboarding I could not verify as freely available. Nothing
-here has ever talked to GSTN.
+**No live GSTN integration.** The client interface, the fake portal and the
+idempotent submit path all exist and are measured, but sandbox access runs
+through a licensed GSP and requires business onboarding I could not verify as
+freely available. Nothing here has ever talked to GSTN. A fake conforms to the
+shapes I could read; it cannot reproduce a rejection rule nobody documented.
+
+**No ingest layer and no review API.** Real purchase registers arrive as
+spreadsheets in formats nobody agreed on, and the human gate — which the
+instability result in Part 5 makes load-bearing rather than decorative — is
+reachable only from the CLI. Those two gaps, not the model work, are what
+stand between this and a business using it.
 
 **Synthetic data only, and it must stay that way.** Free-tier provider terms
 state prompts may be used to improve their products. This stack must not be
@@ -634,7 +692,9 @@ docker compose up -d && uv sync --group dev
 | `uv run gst-recon reconcile` | Tier 1 over a generated cycle. No key needed. |
 | `uv run pytest -q` | Full suite, offline, no key, no network. |
 | `uv run gst-recon investigate --mode live --verbose` | Live agent run. |
+| `uv run gst-recon cycle` | The full cycle end to end, offline. |
 | `uv run gst-recon experiment all` | Regenerate `results/`. |
+| `uv run pytest tests/chaos -m chaos` | Crash tests. Kills a process; needs Postgres. |
 
 **To add an exception class:** add it to `ExceptionClass`, give it a route in
 `DEFAULT_ROUTING` (the test asserting the routing table covers every class will

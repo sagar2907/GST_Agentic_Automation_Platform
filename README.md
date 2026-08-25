@@ -29,15 +29,20 @@ Those get agents. The boundary between them is measured, not asserted.
 | Tier 3 recovery agent | Working, simulated | Injection tests; no live email integration |
 | Local model tier (Ollama) | Working | Fallback-chain floor; §6.7 ablation across three tiers |
 | Durable workflow semantics | Verified | Crash/resume measured directly (see below) |
+| Hash-chained audit log | Working | Deletion and alteration both caught by `verify_chain` |
+| Idempotent IMS submit | Working, against a fake portal | Key derived from the decision; replay answers `ALREADY_APPLIED` |
+| End-to-end cycle orchestration | Working | Record-before-act and no-double-submit as property tests |
+| Exactly-once submission under crash | **Measured** | Real `os._exit(9)`, fresh process: 6 documents, 6 portal rows, 0 duplicates |
 
 ### Not done, and why
 
-- **No GSTN client at all.** There is no `gstn/` module. Sandbox access runs
-  through a licensed GSP and needs a developer registration this build never
-  made, so the client, the auth flow and the idempotent submit are unwritten --
-  not stubbed, absent. Nothing here has ever talked to GSTN, and until that
-  module exists the exactly-once submission property is a property of the
-  workflow engine rather than of this system.
+- **No live GSTN connection.** `gstn/` holds the client interface and a fake
+  portal built to the published request and response shapes, and the submit
+  path is now measured end to end against it. What is missing is credentials:
+  sandbox access runs through a licensed GSP and needs a developer registration
+  this build never made. Nothing here has ever talked to GSTN, and a fake is a
+  model of the portal, not the portal -- it cannot surface a rejection rule
+  nobody documented.
 - **No real taxpayer data, ever.** Everything is seeded synthetic data. The
   free-tier provider terms state that prompts may be used to improve their
   products, so this stack **must not** be pointed at a real purchase register.
@@ -49,8 +54,11 @@ Those get agents. The boundary between them is measured, not asserted.
   A server-rendered dashboard needs none and is not written either, which
   matters more than the framework choice: the human gate is load-bearing, and
   right now the only way to work the queue is the CLI.
-- **Five modules from the intended layout are missing**: `ingest`, `gstn`,
-  `workflow`, `audit`, `api`. `tests/integration` and `tests/chaos` are empty.
+- **Two modules from the intended layout are still missing**: `ingest` (schema
+  mapping, XLSX and Tally parsers) and `api`. Real purchase registers arrive as
+  spreadsheets nobody agreed on a format for, and that gap is between this and
+  any actual business. `audit`, `gstn` and `workflow` now exist, and
+  `tests/integration` and `tests/chaos` are no longer empty.
 - **Per-class F1 is not reported.** At the sample sizes here a nine-way split
   gives roughly ±19% intervals, which is noise. Reporting it would imply
   precision the data does not support.
@@ -194,6 +202,26 @@ measured fact here, not an inherited assumption. Post-crash status is
 `ENQUEUED`, not `PENDING`, and the workflow ledger lives in a separate
 `*_dbos_sys` database.
 
+### Exactly-once submission, measured on the pipeline
+
+Those two facts plus a derived idempotency key *imply* that the pipeline cannot
+double-submit. Implication is not evidence, so the claim is tested directly: a
+worker is killed with `os._exit(9)` partway through six documents and a fresh
+process resumes it against the same Postgres.
+
+| Quantity | Result |
+|---|---|
+| Documents submitted | 6 |
+| Rows applied at the portal | **6** |
+| Documents applied twice | **0** |
+| Submit attempts | **7** — one retry, of the interrupted step alone |
+| Outcome of the retry | `ALREADY_APPLIED`, not a second action |
+
+The seventh attempt is the point. The interrupted step *does* run again,
+presents the same derived key, and is answered as a replay. A generated key
+would have been a different key on the retry — which is precisely the moment it
+has to be the same one.
+
 ---
 
 ## Two results I threw away
@@ -236,10 +264,23 @@ The full suite runs offline against a deterministic provider — no key, no netw
 uv run pytest -q
 ```
 
+The whole cycle, offline, writing its audit chain out:
+
+```bash
+uv run gst-recon cycle --audit-out results/audit_cycle.jsonl
+```
+
 Live agent run (requires `.env` with `GEMINI_API_KEY`):
 
 ```bash
 uv run gst-recon investigate --mode live --limit 5 --verbose
+```
+
+The crash tests are deselected by default — they kill a real process and need
+Postgres up:
+
+```bash
+uv run pytest tests/chaos -m chaos
 ```
 
 ---
@@ -270,6 +311,12 @@ invoices" is talking to a process whose entire vocabulary is questions.
 above the value ceiling requires a human, and a Finding whose evidence cannot be
 traced to a recorded tool call is refused outright.
 
+**The decision is written down before it is acted on.** If the process dies
+between the two, the audit says a decision was taken and the portal may or may
+not have applied it — a discrepancy a human can find and settle. The other
+order loses the decision entirely and leaves an action at the portal nobody can
+account for. Given a choice of failure, prefer the one that is visible.
+
 ---
 
 ## Layout
@@ -283,6 +330,9 @@ src/gst_recon/
   llm/          provider-neutral types, cache, shard router, offline fake
   agents/       read-only tool surface, Tier 2 investigation, Tier 3 recovery
   memory/       precedent store (in-memory and pgvector)
+  audit/        append-only hash-chained decision record
+  gstn/         GSP client interface, fake portal, derived idempotency key
+  workflow/     the cycle as plain functions, plus its durable wrapper
   experiments/  ablation, budget curve, memory curve, Wilson intervals
 tests/          unit, property, integration, chaos
 results/        committed CSV and JSON output
