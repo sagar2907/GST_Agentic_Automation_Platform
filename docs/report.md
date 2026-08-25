@@ -214,6 +214,13 @@ wrapper around it. Durability lives in one place. The agent loop inside a step
 stays a step rather than becoming a second layer checkpointing the same
 progress.
 
+**`ingest/`** — Where unvalidated data enters, so the disposition inverts:
+assume the file is wrong. Amounts are read as the text the file stores rather
+than through a float. Column headings are matched against a table rather than
+inferred by a model, because a table fails by finding nothing and a model fails
+by confidently mapping the wrong column. Ambiguity is refused rather than
+resolved by majority or locale.
+
 **`experiments/`** — The ablation, the budget curve, the memory curve, and
 Wilson intervals.
 
@@ -295,7 +302,7 @@ at these sizes.
 
 ---
 
-# Part 4 — Four times I was wrong
+# Part 4 — Five times I was wrong
 
 This is the most useful part of the document.
 
@@ -387,7 +394,41 @@ computed difference between the tax amounts in the purchase register and GSTR-2B
 is 538.00, which exceeds the configured tolerance"* — citing
 `tc00-compute_tolerance_match`.
 
-## 4.5 And two results I deleted
+## 4.5 A format reader tested against its own assumptions
+
+**What happened.** I wrote an XLSX reader from the standard library rather than
+take a spreadsheet dependency, for a reason I still think is right: a cell
+holding `1234.56` is stored as that text, and every library turns it into a
+float — the one type this system forbids for money.
+
+Then I nearly tested it against fixtures I would also have written. Both sides
+would have encoded the same beliefs about the format, and the suite would have
+passed while proving nothing beyond my own self-consistency. It is the same
+error as scoring the offline agent against the table it reads from, arriving in
+a shape I did not recognise because it looked like ordinary unit testing.
+
+**The fix.** `openpyxl` came in as a dev-only dependency used *solely to write
+fixtures*. It never reads anything. Its only job is to be somebody else's
+implementation of the format.
+
+**What it found, immediately.** Two real bugs, both of the kind that shared
+assumptions hide:
+
+- Relationship targets can be absolute from the package root
+  (`/xl/worksheets/sheet1.xml`) or relative to the part that declared them. I
+  had assumed relative, so the reader built `xl/xl/worksheets/sheet1.xml` and
+  failed on every workbook openpyxl wrote.
+- Rows were appended in arrival order rather than placed at the row number the
+  file gives them, so a blank spacer row between sections was silently closed
+  up. Every row number after it shifted by one — and that number is exactly
+  what a rejection message hands a reviewer, so the register would have sent
+  them to row 400 for a problem on row 401.
+
+**The lesson.** Circularity does not only look like an eval scoring itself. It
+also looks like a test suite whose fixtures were built by the code under test's
+own author, on the same afternoon, from the same mental model of the format.
+
+## 4.6 And two results I deleted
 
 Offline, trajectory scoring reported **first-probe accuracy 1.000, reference
 overlap 1.000, zero excess steps**. The straight-through curve reported
@@ -655,11 +696,16 @@ through a licensed GSP and requires business onboarding I could not verify as
 freely available. Nothing here has ever talked to GSTN. A fake conforms to the
 shapes I could read; it cannot reproduce a rejection rule nobody documented.
 
-**No ingest layer and no review API.** Real purchase registers arrive as
-spreadsheets in formats nobody agreed on, and the human gate — which the
-instability result in Part 5 makes load-bearing rather than decorative — is
-reachable only from the CLI. Those two gaps, not the model work, are what
-stand between this and a business using it.
+**No review API.** The human gate — which the instability result in Part 5
+makes load-bearing rather than decorative — is reachable only from the CLI.
+That gap, not the model work, is what stands between this and a business using
+this system.
+
+**Ingest reads a register but has not met a real one.** The reader, the header
+table and the coercion rules are tested against workbooks written by an
+independent implementation, but every register they have seen was constructed
+for a test. The alias table will meet headings it does not know; that failure
+is at least the loud kind.
 
 **Synthetic data only, and it must stay that way.** Free-tier provider terms
 state prompts may be used to improve their products. This stack must not be
@@ -692,6 +738,7 @@ docker compose up -d && uv sync --group dev
 | `uv run gst-recon reconcile` | Tier 1 over a generated cycle. No key needed. |
 | `uv run pytest -q` | Full suite, offline, no key, no network. |
 | `uv run gst-recon investigate --mode live --verbose` | Live agent run. |
+| `uv run gst-recon ingest <file>` | Read a real register and report what was read. |
 | `uv run gst-recon cycle` | The full cycle end to end, offline. |
 | `uv run gst-recon experiment all` | Regenerate `results/`. |
 | `uv run pytest tests/chaos -m chaos` | Crash tests. Kills a process; needs Postgres. |

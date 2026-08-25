@@ -33,6 +33,8 @@ Those get agents. The boundary between them is measured, not asserted.
 | Idempotent IMS submit | Working, against a fake portal | Key derived from the decision; replay answers `ALREADY_APPLIED` |
 | End-to-end cycle orchestration | Working | Record-before-act and no-double-submit as property tests |
 | Exactly-once submission under crash | **Measured** | Real `os._exit(9)`, fresh process: 6 documents, 6 portal rows, 0 duplicates |
+| XLSX / CSV register ingest | Working | Standard-library reader, tested against workbooks openpyxl wrote |
+| Header mapping and coercion | Working | Refuses ambiguity rather than resolving it |
 
 ### Not done, and why
 
@@ -54,11 +56,14 @@ Those get agents. The boundary between them is measured, not asserted.
   A server-rendered dashboard needs none and is not written either, which
   matters more than the framework choice: the human gate is load-bearing, and
   right now the only way to work the queue is the CLI.
-- **Two modules from the intended layout are still missing**: `ingest` (schema
-  mapping, XLSX and Tally parsers) and `api`. Real purchase registers arrive as
-  spreadsheets nobody agreed on a format for, and that gap is between this and
-  any actual business. `audit`, `gstn` and `workflow` now exist, and
-  `tests/integration` and `tests/chaos` are no longer empty.
+- **One module from the intended layout is still missing**: `api`. Everything
+  else in the layout now exists, and `tests/integration` and `tests/chaos` are
+  no longer empty.
+- **Ingest has never met a real register.** The reader, the header table and
+  the coercion rules are tested against workbooks written by an independent
+  implementation, but every file they have seen was built for a test. The alias
+  table will meet headings it does not know — that failure is at least the loud
+  kind, which is the point of it being a table.
 - **Per-class F1 is not reported.** At the sample sizes here a nine-way split
   gives roughly ±19% intervals, which is noise. Reporting it would imply
   precision the data does not support.
@@ -264,6 +269,12 @@ The full suite runs offline against a deterministic provider — no key, no netw
 uv run pytest -q
 ```
 
+Read a real register and see what was made of it before anything acts on it:
+
+```bash
+uv run gst-recon ingest path/to/register.xlsx
+```
+
 The whole cycle, offline, writing its audit chain out:
 
 ```bash
@@ -311,6 +322,14 @@ invoices" is talking to a process whose entire vocabulary is questions.
 above the value ceiling requires a human, and a Finding whose evidence cannot be
 traced to a recorded tool call is refused outright.
 
+**Ingest refuses rather than guesses.** `03/04/2026` is 3 April to an Indian
+accountant and 4 March to an American spreadsheet. One row with a day past the
+12th settles the whole column; when no row settles it the file is refused
+rather than read under a locale default. Same rule for headers: two columns
+claiming one field is a refusal, not a tie-break. A misread amount produces a
+mismatch someone investigates — a misread date produces a perfectly well-formed
+document in the wrong return period, and nothing downstream ever questions it.
+
 **The decision is written down before it is acted on.** If the process dies
 between the two, the audit says a decision was taken and the portal may or may
 not have applied it — a discrepancy a human can find and settle. The other
@@ -330,6 +349,7 @@ src/gst_recon/
   llm/          provider-neutral types, cache, shard router, offline fake
   agents/       read-only tool surface, Tier 2 investigation, Tier 3 recovery
   memory/       precedent store (in-memory and pgvector)
+  ingest/       xlsx and csv readers, header mapping, coercion
   audit/        append-only hash-chained decision record
   gstn/         GSP client interface, fake portal, derived idempotency key
   workflow/     the cycle as plain functions, plus its durable wrapper
