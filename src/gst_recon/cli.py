@@ -13,11 +13,13 @@ import io
 import json
 import sys
 from datetime import date
+from pathlib import Path
 
 from gst_recon.agents.investigate import investigate
 from gst_recon.agents.tools import ToolSurface
 from gst_recon.config import AgentBudgets, load_provider_credentials, load_settings
 from gst_recon.data.generator import DISTRIBUTION_MIX, HARD_MIX, generate
+from gst_recon.gstn import FakeGspClient
 from gst_recon.llm import build_router
 from gst_recon.matching.engine import reconcile
 from gst_recon.policy.gate import assess_drc01c, days_to_cutoff, decide
@@ -139,6 +141,51 @@ def command_investigate(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_cycle(args: argparse.Namespace) -> int:
+    """Run one filing cycle end to end and report what it did."""
+    from datetime import UTC, datetime  # noqa: PLC0415 -- only this command needs it
+
+    from gst_recon.workflow import run_cycle  # noqa: PLC0415 -- pulls in the agent stack
+
+    settings = load_settings()
+    if args.mode == "live" and not load_provider_credentials():
+        print("no provider credentials found in .env; refusing to run live", file=sys.stderr)
+        return 2
+
+    dataset = _cycle(args.seed, args.clean_pairs, HARD_MIX)
+    client = FakeGspClient()
+    router = build_router(settings.cache_dir, mode=args.mode)
+    as_of = date.fromisoformat(args.as_of)
+    outcome = run_cycle(
+        dataset,
+        client,
+        router,
+        settings,
+        as_of=as_of,
+        # Fixed rather than read from the clock, so two runs of the same cycle
+        # produce byte-identical audit entries and can be diffed.
+        recorded_at=datetime(as_of.year, as_of.month, as_of.day, 9, 0, tzinfo=UTC),
+        limit=args.limit,
+    )
+
+    print(f"period                {outcome.period}")
+    print(f"documents             {outcome.documents}")
+    print(f"exact / fuzzy         {outcome.exact_matches} / {outcome.fuzzy_matches}")
+    print(f"exceptions handled    {outcome.exceptions}")
+    print(f"  closed by rule      {outcome.rule_closed}")
+    print(f"  investigated        {outcome.investigated}")
+    print(f"  queued for a human  {outcome.queued_for_human}")
+    print(f"submitted to portal   {outcome.submitted}")
+    print(f"replayed (no-op)      {outcome.replayed}")
+    print(f"days to IMS cut-off   {outcome.days_to_cutoff}")
+    intact, why = outcome.audit.verify_chain()
+    print(f"audit entries         {len(outcome.audit)}  chain: {why}")
+    print(f"exactly-once violations {outcome.exactly_once_violations}")
+    if args.audit_out:
+        print(f"wrote {outcome.audit.write_jsonl(Path(args.audit_out))}")
+    return 0 if intact and outcome.exactly_once_violations == 0 else 1
+
+
 def _run_ablation(experiments, _args: argparse.Namespace, suffix: str) -> None:
     rows = [arm.as_row() for arm in experiments.tiering_ablation()]
     print(f"wrote {experiments.write_csv(f'tiering_ablation{suffix}', rows)}")
@@ -253,6 +300,15 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--max-steps", type=int, default=6)
     agent.add_argument("--verbose", action="store_true")
     agent.set_defaults(func=command_investigate)
+
+    cyc = sub.add_parser("cycle", help="run one filing cycle end to end")
+    cyc.add_argument("--mode", choices=("fake", "live", "local"), default="fake")
+    cyc.add_argument("--seed", type=int, default=4242)
+    cyc.add_argument("--clean-pairs", type=int, default=120)
+    cyc.add_argument("--limit", type=int, default=20)
+    cyc.add_argument("--as-of", default="2026-07-10")
+    cyc.add_argument("--audit-out", default="")
+    cyc.set_defaults(func=command_cycle)
 
     exp = sub.add_parser("experiment", help="run an experiment and write results/")
     exp.add_argument(
