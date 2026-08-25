@@ -35,6 +35,8 @@ Those get agents. The boundary between them is measured, not asserted.
 | Exactly-once submission under crash | **Measured** | Real `os._exit(9)`, fresh process: 6 documents, 6 portal rows, 0 duplicates |
 | XLSX / CSV register ingest | Working | Standard-library reader, tested against workbooks openpyxl wrote |
 | Header mapping and coercion | Working | Refuses ambiguity rather than resolving it |
+| Human review queue, served | Working | Approval bound to a named person and to the page they read |
+| Injection resistance of the review page | Working | Escaping enforced by type; no script tag in any page |
 
 ### Not done, and why
 
@@ -52,13 +54,23 @@ Those get agents. The boundary between them is measured, not asserted.
   The offline provider is scripted, so quality figures measured against it are
   circular — the harness refuses to produce them (see *Two results I threw
   away*).
-- **No React UI, and no review queue.** No Node toolchain on the build machine.
-  A server-rendered dashboard needs none and is not written either, which
-  matters more than the framework choice: the human gate is load-bearing, and
-  right now the only way to work the queue is the CLI.
-- **One module from the intended layout is still missing**: `api`. Everything
-  else in the layout now exists, and `tests/integration` and `tests/chaos` are
-  no longer empty.
+- **No React UI.** There is no Node toolchain on the build machine. The review
+  queue is server-rendered HTML instead, which needs none — and which turned
+  out to be the better answer for this page rather than a compromise, since a
+  page that ships no JavaScript can serve a content-security policy with no
+  script allowance at all.
+- **No authentication on the review queue.** It binds an approval to a *typed*
+  name, which makes the audit trail attributable but not authenticated —
+  anyone who can reach the port can type any name. It is built to be run on
+  localhost or behind something that already knows who the user is. Adding
+  sessions without an identity provider to check them against would look like
+  security while being decoration.
+- **The queue lives in memory.** A restart loses the worklist. It does not lose
+  a decision — the audit log is written first and is the durable record — which
+  is the right way round, but it does mean a long-running deployment wants the
+  queue rebuilt from a re-run cycle rather than resumed.
+- **Every module in the intended layout now exists**, and `tests/integration`
+  and `tests/chaos` are no longer empty.
 - **Ingest has never met a real register.** The reader, the header table and
   the coercion rules are tested against workbooks written by an independent
   implementation, but every file they have seen was built for a test. The alias
@@ -269,6 +281,12 @@ The full suite runs offline against a deterministic provider — no key, no netw
 uv run pytest -q
 ```
 
+Put the cases the gate held back in front of a person:
+
+```bash
+uv run gst-recon serve
+```
+
 Read a real register and see what was made of it before anything acts on it:
 
 ```bash
@@ -322,6 +340,22 @@ invoices" is talking to a process whose entire vocabulary is questions.
 above the value ceiling requires a human, and a Finding whose evidence cannot be
 traced to a recorded tool call is refused outright.
 
+**An approval is bound to the page it came from.** Every review card carries a
+digest of what was displayed — the proposed action, the rationale, the reasons,
+the amount, the cited claims. An approval quoting a digest that no longer
+matches is refused. This is not a CSRF token and identifies no session; it
+identifies *content*. The failure it prevents needs no attacker: a cycle re-run
+between loading the page and pressing the button is enough to change the
+proposal underneath a reviewer, and approving text nobody read is the one thing
+a human gate must not permit.
+
+**Escaping in the review page is a property of the type, not of remembering.**
+The rationale is model-written, and in Tier 3 the model has read free text a
+supplier sent. `tag()` escapes every child string it is handed and only a
+`Safe` passes through, so forgetting to escape is not a mistake that is
+available — it would have to be an explicit `raw()` call, which is greppable in
+a way an f-string is not.
+
 **Ingest refuses rather than guesses.** `03/04/2026` is 3 April to an Indian
 accountant and 4 March to an American spreadsheet. One row with a day past the
 12th settles the whole column; when no row settles it the file is refused
@@ -350,6 +384,7 @@ src/gst_recon/
   agents/       read-only tool surface, Tier 2 investigation, Tier 3 recovery
   memory/       precedent store (in-memory and pgvector)
   ingest/       xlsx and csv readers, header mapping, coercion
+  api/          review queue, escape-by-type HTML, SSE stream
   audit/        append-only hash-chained decision record
   gstn/         GSP client interface, fake portal, derived idempotency key
   workflow/     the cycle as plain functions, plus its durable wrapper

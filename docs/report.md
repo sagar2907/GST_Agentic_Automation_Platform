@@ -221,6 +221,12 @@ inferred by a model, because a table fails by finding nothing and a model fails
 by confidently mapping the wrong column. Ambiguity is refused rather than
 resolved by majority or locale.
 
+**`api/`** — The review queue, which is where the instability result stops
+being an observation and becomes a control. Server-rendered HTML with no
+JavaScript, so the response can carry a content-security policy with no script
+allowance; escaping is enforced by type rather than by discipline, because the
+text on the page was written by a model that has read what a supplier sent.
+
 **`experiments/`** — The ablation, the budget curve, the memory curve, and
 Wilson intervals.
 
@@ -291,7 +297,30 @@ fed by the agent's own unreviewed conclusions would compound its mistakes just
 as efficiently as its successes — it would get more confident without getting
 more correct, which is worse than no memory at all.
 
-## 3.6 Wilson intervals, not the textbook formula
+## 3.6 An approval is bound to the page it came from
+
+The human gate exists because the agent is not stable. That makes one question
+sharper than it first appears: what exactly did the person agree to?
+
+"They clicked approve on case E00003" is not an answer, because the case is a
+row in a queue and the queue is rebuilt every time a cycle runs. Between the
+page rendering and the button arriving, a re-run can replace the proposal —
+and given the instability measurement, a re-run *will* sometimes propose the
+opposite action on identical inputs. The reviewer would then be approving an
+`ACCEPT` having read the argument for a `REJECT`, with an audit trail that
+looks impeccable.
+
+So every card carries a digest of what was actually displayed: the proposed
+action, the rationale, the reasons, the amount, and each cited claim. An
+approval quoting a stale digest is refused.
+
+This is not a CSRF token. A CSRF token answers *did this request come from our
+form*, and identifies a session. This answers *did this person read what they
+are agreeing to*, and identifies content. The threat it addresses is not an
+attacker at all — it is the system changing its own mind between render and
+submit, which it demonstrably does.
+
+## 3.7 Wilson intervals, not the textbook formula
 
 Every headline number here is a proportion on a few dozen to a few hundred
 cases. The normal approximation degrades exactly where this project lives —
@@ -696,10 +725,17 @@ through a licensed GSP and requires business onboarding I could not verify as
 freely available. Nothing here has ever talked to GSTN. A fake conforms to the
 shapes I could read; it cannot reproduce a rejection rule nobody documented.
 
-**No review API.** The human gate — which the instability result in Part 5
-makes load-bearing rather than decorative — is reachable only from the CLI.
-That gap, not the model work, is what stands between this and a business using
-this system.
+**The review queue has no authentication.** It binds an approval to a *typed*
+name, which makes the trail attributable but not authenticated: anyone who can
+reach the port can type any name. It is built to run on localhost or behind
+something that already knows who the user is. Adding sessions with no identity
+provider to check them against would look like security while being decoration,
+and this document would then be claiming a control that does not exist.
+
+**The queue is held in memory.** A restart loses the worklist but not a
+decision, since the audit log is written first and is the durable record. That
+is the right way round, and it still means a long-running deployment wants the
+queue rebuilt from a re-run cycle rather than resumed.
 
 **Ingest reads a register but has not met a real one.** The reader, the header
 table and the coercion rules are tested against workbooks written by an
@@ -740,6 +776,7 @@ docker compose up -d && uv sync --group dev
 | `uv run gst-recon investigate --mode live --verbose` | Live agent run. |
 | `uv run gst-recon ingest <file>` | Read a real register and report what was read. |
 | `uv run gst-recon cycle` | The full cycle end to end, offline. |
+| `uv run gst-recon serve` | Serve the human review queue for one cycle. |
 | `uv run gst-recon experiment all` | Regenerate `results/`. |
 | `uv run pytest tests/chaos -m chaos` | Crash tests. Kills a process; needs Postgres. |
 
