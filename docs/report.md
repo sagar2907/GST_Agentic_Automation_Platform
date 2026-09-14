@@ -340,8 +340,21 @@ work that auto-accepted.
 **A threshold.** If the credit you claim in GSTR-3B exceeds what GSTR-2B says is
 available by more than a threshold, the system issues a **DRC-01C** intimation
 under Rule 88D — you get seven days to respond. The threshold is the *lower* of
-₹1 lakh and 20% of the available credit. Reading "lower" as "higher" would
-understate your exposure on every small book, which is the direction that hurts.
+₹1 **lakh** and 20% of the available credit. A lakh is the Indian numbering
+unit for 100,000, so ₹1 lakh is ₹1,00,000 — written with the comma two digits
+earlier than the international convention. Reading "lower" as "higher" would
+understate your exposure on every small book, which is the direction that
+hurts.
+
+A worked example, because "the lower of two things" is easy to skim past and
+get backwards. A business with ₹5 lakh of available credit has a threshold of
+`min(₹1 lakh, 20% × ₹5 lakh) = min(₹1,00,000, ₹1,00,000) = ₹1,00,000` — the two
+happen to tie here. A smaller business with only ₹1 lakh of available credit
+gets `min(₹1,00,000, ₹20,000) = ₹20,000` — a much tighter threshold, in rupee
+terms, than the business ten times its size. The 20% share shrinks the
+threshold fastest for small businesses, which is the property the "lower of"
+wording exists to enforce: a large claimant cannot hide behind a flat rupee
+ceiling, and a small one cannot be waved through by a flat percentage.
 
 **An expiry.** Section 16(4) caps how late a credit may be claimed: by 30
 November following the end of the financial year it belongs to.
@@ -486,6 +499,70 @@ text on the page was written by a model that has read what a supplier sent.
 **`experiments/`** — The ablation, the budget curve, the memory curve, and
 Wilson intervals.
 
+## 2.4 One invoice, start to finish
+
+The module list above says what each piece is responsible for. This section
+says what actually happens, in order, to one concrete document — because a
+list of responsibilities is easy to read and hard to picture running.
+
+Say the purchase register has this line: supplier GSTIN `27AAAPA1234A1Z5`,
+invoice `INV/2026/047`, tax amount ₹11,800. GSTR-2B, for the same supplier,
+has invoice `INV-2026-47` at ₹11,850. Different formatting, and a ₹50
+difference. Here is the whole pipeline acting on that one pair.
+
+1. **`ingest/`** already turned whatever file this arrived in — a spreadsheet,
+   typically — into these two structured records, refusing the file outright
+   if a column or a date was ambiguous rather than guessing.
+2. **`matching/normalise`** reduces both invoice numbers to a comparable form:
+   `INV/2026/047` and `INV-2026-47` both become the token sequence
+   `["INV", 2026, 47]` — punctuation is formatting, and the letters and digits
+   underneath already agree.
+3. **`matching/engine`**, pass 1 (exact), looks for a pair whose normalised
+   number *and* amount both match exactly. They don't — the amounts differ by
+   ₹50 — so this pair is not consumed here and stays available for pass 2.
+4. **`matching/engine`**, pass 2 (fuzzy), checks whether the ₹50 gap is within
+   the configured tolerance (an absolute rupee allowance, capped as a
+   proportion of the invoice value — see `policy/`, Part 2.3). Say it is. The
+   pair is matched, tagged with the rule that matched it and the exact gap, and
+   the pipeline's work on this document **ends here** — it never reaches an
+   LLM, and this is the 91% case from Part 6.1.
+5. **Now suppose instead the gap were ₹4,500**, outside tolerance. Pass 2 also
+   declines it, and **`matching/classify`** assigns it an exception class —
+   here, `AMOUNT_MISMATCH` (Part 1.5) — and the deterministic pipeline's part
+   is done; the case is now residue.
+6. **`policy/gate`** (Part 3, `route()`) checks whether this exception class is
+   one a fixed rule can close outright (a duplicate, a cancelled e-invoice) or
+   whether it needs a look a rule cannot give it. `AMOUNT_MISMATCH` needs a
+   look, so it routes to Tier 2.
+7. **`agents/investigate`** now runs the bounded ReAct loop (Part 0.4) on this
+   one case. It might call `compute_tolerance_match` to get the exact
+   deterministic verdict on the gap, decide that's sufficient, and stop after
+   one step — this is the common case from the step-budget finding in Part
+   6.3. It returns a **Finding**: a proposed action (`ACCEPT`, `REJECT`, or
+   `PENDING`), a confidence, a plain-English rationale, and a citation to the
+   specific tool call that produced the number it relied on (Part 3.4).
+8. **`policy/gate`** looks at the Finding, not to trust it, but to decide
+   whether a person has to look at it too (Part 3, `decide()`). A `REJECT`, or
+   an `ACCEPT` above the value ceiling, always requires a human — regardless
+   of how confident the model sounded.
+9. **`audit/`** writes the decision down — the proposed action, the reasons,
+   the model, a hash of the prompt, the amount at risk — *before* anything is
+   sent anywhere, chained to the entry before it (Part 0.6, Part 0.7).
+10. If the gate required a human, **`api/`** puts the case in the review
+    queue, with a digest of exactly what is displayed (Part 3.6). A named
+    person approves, overrides, or holds it; that decision supersedes the
+    audit entry from step 9 rather than replacing it.
+11. **`gstn/`** submits the final action to the portal, carrying an
+    idempotency key derived from the decision's own content (Part 0.8) —
+    so if the process crashes right after sending and has to retry, the
+    portal recognises the retry as the same request rather than acting twice.
+
+Eleven steps, and for the 91% of documents that close in step 4, the whole
+journey is steps 1 through 4 — no model, no queue, no idempotency key needed
+at all. The expensive machinery in steps 6 through 11 exists specifically for
+the minority of documents that genuinely need it, which is the thesis in Part
+2.1 stated as a trace rather than as a claim.
+
 ---
 
 # Part 3 — Design decisions
@@ -570,7 +647,10 @@ So every card carries a digest of what was actually displayed: the proposed
 action, the rationale, the reasons, the amount, and each cited claim. An
 approval quoting a stale digest is refused.
 
-This is not a CSRF token. A CSRF token answers *did this request come from our
+This is not a **CSRF token** — a small hidden value most web forms include so
+the server can tell a submission genuinely came from a page it served, rather
+than from a malicious site tricking a logged-in browser into submitting on the
+attacker's behalf. A CSRF token answers *did this request come from our
 form*, and identifies a session. This answers *did this person read what they
 are agreeing to*, and identifies content. The threat it addresses is not an
 attacker at all — it is the system changing its own mind between render and
@@ -625,7 +705,8 @@ dictionary ordering.
 two adjacent characters. For one vendor whose GSTIN contained the run `LLL`, it
 swapped two identical characters — a no-op. The case was labelled
 `GSTIN_MISMATCH` while both sides were byte-identical. Tier 1 matched it
-cleanly and scored a false negative **against ground truth that was itself
+cleanly and scored a **false negative** — the term for "the system said no
+problem here, and it was wrong" — **against ground truth that was itself
 wrong**.
 
 **Why it matters more than it looks.** This is the failure mode no amount of
@@ -681,20 +762,23 @@ is 538.00, which exceeds the configured tolerance"* — citing
 
 ## 4.5 A format reader tested against its own assumptions
 
-**What happened.** I wrote an XLSX reader from the standard library rather than
-take a spreadsheet dependency, for a reason I still think is right: a cell
-holding `1234.56` is stored as that text, and every library turns it into a
-float — the one type this system forbids for money.
+**What happened.** **XLSX** is the file format modern Excel spreadsheets are
+saved as. I wrote a reader for it from the standard library rather than take
+a spreadsheet dependency, for a reason I still think is right: a cell holding
+`1234.56` is stored as that text, and every library turns it into a float —
+the one type this system forbids for money.
 
-Then I nearly tested it against fixtures I would also have written. Both sides
-would have encoded the same beliefs about the format, and the suite would have
+Then I nearly tested it against **fixtures** — the sample input files a test
+suite runs against — that I would also have written by hand. Both sides would
+have encoded the same beliefs about the format, and the suite would have
 passed while proving nothing beyond my own self-consistency. It is the same
 error as scoring the offline agent against the table it reads from, arriving in
 a shape I did not recognise because it looked like ordinary unit testing.
 
-**The fix.** `openpyxl` came in as a dev-only dependency used *solely to write
-fixtures*. It never reads anything. Its only job is to be somebody else's
-implementation of the format.
+**The fix.** `openpyxl`, a real spreadsheet library, came in as a dev-only
+dependency used *solely to write fixtures*. It never reads anything in this
+project. Its only job is to be somebody else's implementation of the format,
+so the test fixtures stop sharing my own assumptions about it.
 
 **What it found, immediately.** Two real bugs, both of the kind that shared
 assumptions hide:
@@ -717,7 +801,9 @@ own author, on the same afternoon, from the same mental model of the format.
 
 Offline, trajectory scoring reported **first-probe accuracy 1.000, reference
 overlap 1.000, zero excess steps**. The straight-through curve reported
-**precision 1.000 at every confidence threshold**.
+**precision 1.000 at every confidence threshold** — precision here meaning
+"of the cases the system was confident enough to decide on its own, what
+share were actually decided correctly."
 
 Both were meaningless. The offline provider is scripted from the same
 `REFERENCE_PROBES` table the evaluator scores against — it was marking a script
@@ -735,16 +821,26 @@ pinning the refusal.
 After the system worked, I went looking for what was methodologically weak.
 
 The most useful finding was *Stochasticity in Agentic Evaluations: Quantifying
-Inconsistency with Intraclass Correlation* (Mustahsan et al., arXiv 2512.06710),
-together with a broader observation across recent agent-evaluation surveys:
-**most benchmarks report a single run per agent with no confidence intervals,
-and comparisons are made without statistical testing, so reported differences
-may reflect random variation rather than capability.**
+Inconsistency with Intraclass Correlation* (Mustahsan et al., arXiv 2512.06710).
+**Stochasticity** is simply the technical name for the randomness in Part 0.3
+— the same question, asked twice, taking a different path or landing on a
+different answer. The paper, together with a broader observation across
+recent agent-evaluation surveys, makes a claim about how that randomness is
+usually handled in published work: **most benchmarks report a single run per
+agent with no confidence intervals, and comparisons are made without
+statistical testing, so reported differences may reflect random variation
+rather than capability.** In plain terms: if you only ever ask a question
+once, you cannot tell a real improvement apart from a lucky roll.
 
 Two specific claims landed directly on my design:
 
-1. **Temperature 0 does not make a model deterministic.**
-2. **Caching does not eliminate stochasticity — it masks it.**
+1. **Temperature 0 does not make a model deterministic.** (Part 0.3 explains
+   why: temperature controls only one source of randomness, and the
+   underlying hardware and multi-step reasoning both introduce more.)
+2. **Caching does not eliminate stochasticity — it masks it.** A cache (Part
+   0.9) stores one answer and replays it forever after. That makes the
+   *replay* deterministic without making the *model* deterministic — asking
+   again, for real, can still land somewhere else.
 
 That is a direct hit. My content-addressed cache makes results perfectly
 *reproducible*, and I had been treating that as though it meant the agent was
@@ -811,6 +907,34 @@ surface area.
 # Part 6 — Measured results
 
 Everything here was produced by code in the repository.
+
+**How to read the tables below, once, so it never needs repeating.** A few
+column headings recur throughout this part:
+
+- **Resolved** — how many cases got a final answer at all (of any kind),
+  written as `count/total`, e.g. `107/200`.
+- **95% CI** — the Wilson confidence interval (Part 0.12, Part 3.7) around
+  that rate: the range the true rate plausibly falls in, given the sample
+  size. A narrow interval is a rate you can trust; a wide one, at small n, is
+  a rate that could easily look different next time.
+- **Class accuracy** — of the cases that *were* resolved, how many were
+  resolved with the *correct* label (checked against the generator's planted
+  ground truth, Part 2.3 `data/`) — a stricter bar than merely "resolved."
+- **Grounded** — the evidence-groundedness rate (Part 3.4): the share of
+  cited claims where every number in the claim actually appears in the tool
+  result it cites. This is checked mechanically, not by re-reading the
+  rationale and deciding if it sounds right.
+- **Tokens / Secs / Probes** — the resource cost of getting there: how much
+  text the model processed, how long the call took end to end, and how many
+  tool calls the agent made before answering.
+- **Repairs** — how many times the harness had to re-ask the model because
+  its first answer did not parse as valid structured output (Part 0.4's JSON
+  schema) at all — a different failure from getting the *content* wrong.
+
+Two rates that sound similar and are not: **resolved** only asks "did a valid
+answer come back," and says nothing about whether it was right. A model could
+resolve 100% of cases and be wrong about all of them. **Class accuracy** and
+**grounded** are the two checks that catch that.
 
 ## 6.1 Tier 1, on 2,138 documents
 
@@ -891,9 +1015,13 @@ significant, and counterintuitive result -- and it is a result about *this
 harness with this prompt*, not a general claim about 8B models.
 
 **The repair step is what makes the local tier viable at all.** Every one of the
-3B's twelve runs needed it. Without grammar-constrained decoding the 3B resolves
-0/12: it reasons correctly and then emits fenced markdown wrapping a schema it
-invented. Measured before the fix, that looked exactly like a capability failure.
+3B's twelve runs needed it. Without **grammar-constrained decoding** — a mode
+some local model servers offer where the model is mechanically forced to only
+ever produce tokens that keep its output matching a given JSON schema (Part
+0.4), so it becomes structurally unable to emit anything else — the 3B
+resolves 0/12: it reasons correctly and then emits fenced markdown wrapping a
+schema it invented, rather than the schema it was actually given. Measured
+before the fix, that looked exactly like a capability failure.
 
 **Groundedness is the metric that matters, and the hosted model scores lowest.**
 One of twelve hosted findings cited a figure its tool never returned. Both local
@@ -1021,6 +1149,19 @@ software engineering, not tax advice.
 
 # Part 8 — Running and extending it
 
+This section assumes a **terminal** — a text window for typing commands
+directly to the computer, rather than clicking — with `git`, Docker, and `uv`
+(a fast installer and runner for Python projects) already available. Each
+command below is typed into that terminal and run by pressing Enter; the
+program `uv run <something>` starts a fresh isolated copy of the project's
+exact dependencies before running `<something>`, so different projects never
+fight over library versions.
+
+The one command below that needs no explanation and no setup at all:
+`uv run gst-recon reconcile` runs Tier 1 (Part 2.2) end to end and needs no
+API key, no Docker, and no network — it is the fastest way to see the project
+do something real.
+
 ```bash
 docker compose up -d && uv sync --group dev
 ```
@@ -1079,6 +1220,12 @@ suite every time code changes, so a breakage is caught within minutes.
 it could plausibly be wrong by, given how much data it was measured on. See
 also *Wilson interval*.
 
+**CSRF token** — A hidden value a web form includes so its server can tell a
+submission genuinely came from a page it served, rather than from another
+site tricking a visitor's browser into submitting on an attacker's behalf.
+Distinct from the confirmation digest this project uses instead — see Part
+3.6.
+
 **Decimal** — A way of representing fractional numbers that matches how they
 are written on paper, used here for every money amount instead of binary
 floating point, which cannot represent most decimal fractions exactly. See
@@ -1104,6 +1251,18 @@ impossible to represent rather than merely discouraged.
 matter how many times the underlying process crashes or retries, usually built
 by combining at-least-once retry with an idempotency key rather than achieved
 directly. See Part 0.10.
+
+**False negative** — A case a system judged clean or unproblematic that was
+actually wrong. (A **false positive** is the mirror case: flagged as a
+problem when it was actually fine.)
+
+**Fixture** — A sample input file or piece of data a test suite runs against,
+prepared in advance rather than generated on the fly.
+
+**Grammar-constrained decoding** — A mode some local model servers offer that
+mechanically forces a model's output to keep matching a given JSON schema at
+every step, making it structurally unable to produce anything else — as
+opposed to simply asking nicely in the prompt and hoping.
 
 **GSTIN** — The 15-character number identifying a taxpayer under GST. The last
 character is a check digit, computed from the other 14, that catches most
@@ -1155,6 +1314,10 @@ bodies.
 have (which fields are required, and what type each one must be), used here to
 tell an LLM precisely how its tool calls and final answers must be structured.
 
+**Lakh** — The Indian numbering unit for 100,000. ₹1 lakh is written
+₹1,00,000, with commas placed two digits earlier than the international
+convention rather than every three digits.
+
 **LLM (Large Language Model)** — A model trained to predict the next chunk of
 text given everything before it, used to generate answers one chunk at a time;
 fluent and confident-sounding regardless of whether the answer is correct. See
@@ -1163,6 +1326,13 @@ Part 0.2.
 **Precedent** — A past exception the system resolved, kept only if a human
 confirmed the resolution was correct, and retrieved later when a similar new
 exception appears so the agent does not re-investigate from zero.
+
+**Precision** — Of the cases a system was confident enough to decide on its
+own, the share it actually decided correctly. A system that only ever answers
+the easy 10% but gets all of them right can report perfect precision while
+being useless on the other 90% — see *Straight-through processing*, and Part
+4.6 for why this number can be trivially gamed by an evaluator that leaks the
+answer.
 
 **Property-based test** — A test that generates many varied, sometimes
 extreme, inputs automatically and checks that a general rule holds for all of
@@ -1181,6 +1351,10 @@ step and a tool-call step, each informed by the result of the last. Short for
 
 **Section 16(4)** — The rule capping how late a tax credit may be claimed: no
 later than 30 November following the end of the financial year it belongs to.
+
+**Stochasticity** — The technical name for randomness in a system's behaviour;
+here, specifically the fact that an LLM can take a different path or reach a
+different answer when asked the same question again. See Part 0.3.
 
 **Straight-through processing** — The share of cases a system resolves with no
 human involvement at all.
@@ -1202,6 +1376,10 @@ for a proportion (like "12 out of 12 resolved") that stays within the
 possible range of 0% to 100% and remains accurate even at small sample sizes,
 unlike the more common textbook formula, which can claim false certainty —
 literally a 0%-wide interval — from a handful of observations.
+
+**XLSX** — The file format modern Microsoft Excel spreadsheets are saved as;
+technically a zip archive containing a set of XML files, which is what makes
+it possible to read one with only the standard library (Part 4.5).
 
 ---
 
