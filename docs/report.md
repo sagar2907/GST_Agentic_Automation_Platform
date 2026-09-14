@@ -1,20 +1,276 @@
 # GST ITC Reconciliation: A Three-Tier Agentic Platform
 
-### Building it, measuring it, and the four times I was wrong
+### Building it, measuring it, and the five times I was wrong
 
 ---
 
 ## 0. How to read this
 
-This document teaches the project from nothing. It assumes you know how to
-program and nothing else — not Indian tax law, not how large language models
-are used as agents, not why anyone would want a "durable workflow".
+This document teaches the project from nothing. It assumes no prior knowledge
+at all — not how to program, not Indian tax law, not what a "large language
+model" is, not why anyone would want a "durable workflow". If a word appears
+that a later part depends on, it is defined before that part uses it.
 
-Part 1 is the domain. Part 2 is the architecture. Part 3 is every design
-decision worth defending. Part 4 is the four decisions that turned out wrong,
-which is the part I would read first. Part 5 is the research that changed the
-design after it was working. Part 6 is the measured numbers. Part 7 is what
-this system cannot do.
+Part 0 is the vocabulary — a handful of ideas from computing and AI that the
+rest of the document leans on, explained once so they never have to be
+re-explained. Part 1 is the domain — GST, credit, and the deadline that makes
+this project necessary. Part 2 is the architecture. Part 3 is every design
+decision worth defending. Part 4 is the five decisions that turned out wrong,
+which is the part I would read first if you only read one. Part 5 is the
+research that changed the design after it was working. Part 6 is the measured
+numbers. Part 7 is what this system cannot do. Part 8 is how to run and extend
+it. A glossary sits at the end for looking a term back up without re-reading
+the section that introduced it.
+
+Nothing in this document is aimed at impressing anyone. Every claim in it is
+either a definition, a decision with its reasoning attached, or a number with
+the file that produced it. Where I got something wrong, I say so, because the
+mistakes are where the actual engineering happened.
+
+---
+
+# Part 0 — Ideas you need before any of this makes sense
+
+Skip this part if you already know what an API, an LLM, a hash function, and a
+database transaction are. Everyone else: read it once. Nothing here is specific
+to tax or to this project — it is the same dozen ideas that sit underneath most
+modern software, and the rest of the document just applies them.
+
+## 0.1 A program that asks another program for something
+
+Two pieces of software that run on different machines (or just in different
+processes) talk to each other by sending messages back and forth over a
+network. One side sends a **request** — "give me the record for GSTIN
+27AAAPA1234A1Z5" — and the other side sends back a **response** — the record,
+or an error saying why not. The rules both sides agree to follow for shaping
+these messages are called an **API** (Application Programming Interface). The
+most common flavour on the modern internet is **HTTP**, the same protocol a web
+browser uses to fetch a page, carrying data usually formatted as **JSON** — text
+that looks like `{"gstin": "27AAAPA1234A1Z5", "amount": "1180.00"}`, structured
+enough for a program to parse without ambiguity.
+
+This project talks to three kinds of thing over an API: an AI model hosted by a
+company (Google's, or one running on Groq's hardware), an AI model running on
+the same machine (via a local program called Ollama), and — in the parts that
+would eventually run for real — the Indian government's tax portal.
+
+## 0.2 A large language model, in one paragraph
+
+A **large language model** (LLM) is a program trained on enormous amounts of
+text to predict, one small chunk at a time, what text is likely to come next
+given everything before it. Ask it a question and it generates an answer the
+same way: token by token, each one chosen because it is statistically plausible
+given the question and everything it has generated so far. It has no database
+of facts it looks things up in and no built-in notion of "I am not sure" — it
+produces fluent, confident-sounding text whether or not that text is correct.
+That single property — *fluent and confident is not the same as correct* — is
+the reason almost every safety mechanism in this project exists.
+
+**"Model" and "provider"** are two different things worth keeping straight.
+The *model* is the trained program itself — Gemini, GPT-OSS, Llama. The
+*provider* is who runs it and answers your API request: Google (Gemini), Groq
+(a company that runs open models on custom hardware, unusually fast), or
+Ollama (a program that runs an open model on your own computer, so nothing
+leaves the machine). This project uses all three, and which one answers a given
+request is a routing decision explained in Part 3.
+
+## 0.3 Why asking twice can give two different answers
+
+Ask a person the same question twice and you expect the same answer, unless
+something changed. LLMs are not built that way by default: generation involves
+a random choice at each step, weighted toward likely words but not forced onto
+the single most likely one, so the exact path taken can differ between two
+identical requests. Providers expose a **temperature** setting — turning it to
+its lowest value, zero, is meant to make the model always pick the single most
+likely next word, which sounds like it should force identical output every
+time.
+
+It does not, in practice, fully deliver that — the underlying hardware and
+software can still introduce small variations, and if there is any tool use or
+multi-step reasoning involved, a difference in step 1 compounds into a
+difference in step 5. **This project measured that directly rather than
+assuming it** (Part 5), and the result — the same question, asked three
+times, answered two different ways — is the single most important empirical
+finding here. It is why a human has to approve the model's risky proposals
+rather than trusting them outright.
+
+## 0.4 An "agent": a loop, not a mind
+
+In this project, an **agent** is not a general intelligence or a chatbot with a
+personality. It is a specific, narrow pattern of code: a loop that (1) asks an
+LLM what to do next, given everything so far, (2) the LLM's answer is either "I
+have my final answer" or "call this specific tool with these specific
+arguments," (3) if it asked for a tool, the code runs that tool — a plain
+function, not another LLM call — and feeds the result back into step 1. This
+loop, alternating reasoning and tool calls, is common enough to have a name:
+**ReAct** (Reason + Act). The LLM never touches a database, a file, or a
+network socket directly. It only ever gets to ask the surrounding code, in
+words, to do something specific and named in advance — which is what makes it
+possible to guarantee, structurally, what an agent can and cannot do (Part
+3.3).
+
+A **tool**, in this sense, is nothing exotic: it is an ordinary function the
+agent's surrounding code makes callable, described to the LLM in plain English
+plus a strict specification of its arguments (a **JSON schema** — a document
+that says "this argument must be a string, that one must be a number, these
+three are required"). "Call the tool named `query_bank_ledger` with this GSTIN
+and this amount" is the entire vocabulary an agent has for interacting with the
+world.
+
+## 0.5 Deterministic versus non-deterministic
+
+A function is **deterministic** if the same input always produces the same
+output, forever, on any machine. Ordinary arithmetic, string comparison, and
+database lookups by a fixed key are deterministic. An LLM call is not — see
+0.3. This distinction matters enormously in engineering, because a
+deterministic function can be unit-tested once and trusted forever, while a
+non-deterministic one has to be treated as an unreliable component whose
+output needs checking, bounding, or a human backstop no matter how good it
+usually is. The central architectural bet of this project (Part 2.1) is to use
+deterministic code for everything it is capable of, and reach for the
+non-deterministic, expensive, occasionally-wrong LLM only for the residue that
+genuinely needs judgement.
+
+## 0.6 Hashing: turning anything into a fixed-length fingerprint
+
+A **hash function** takes an input of any size — a word, a file, a whole
+database — and produces a fixed-length string of characters, its **hash** or
+**digest**, such that: the same input always produces the same hash; a
+one-character change to the input produces a completely different, unrelated-
+looking hash; and there is no practical way to work backwards from the hash to
+recover the input, or to find two different inputs that hash to the same
+value. This project uses **SHA-256**, a widely used, cryptographically strong
+hash function that always produces a 256-bit (64 hex-character) digest no
+matter how large the input.
+
+The property that makes hashing useful here is not secrecy — it is that a
+hash acts as a tamper-evident fingerprint. If you record "this document's hash
+is `a1b2...`" today, and tomorrow someone hands you the document again, you can
+re-hash it and compare: if even a single space changed, the two hashes will
+not match, and you will know something was altered, even though you never
+compared the documents character by character.
+
+## 0.7 A hash chain: how a ledger becomes tamper-evident
+
+A **hash chain** links a sequence of records together by having each record
+include the hash of the *previous* record, alongside its own content. When you
+compute record N's hash, that hash is now baked into record N+1, which is baked
+into record N+2, and so on. The consequence: if anyone edits or deletes record
+N after the fact, its hash changes, which no longer matches what record N+1
+says the previous hash should be — the chain visibly breaks at exactly that
+point, and *walking the chain* (recomputing every hash in order and checking
+each one against what the next record claims) reveals it. This is the same
+core idea a cryptocurrency's blockchain uses for the same reason: make
+after-the-fact tampering detectable rather than physically impossible. This
+project uses it for the audit log (Part 2.3, `audit/`) — every recorded
+decision embeds the previous one's hash, so a deleted or edited entry breaks
+the chain and `verify_chain()` says exactly where.
+
+## 0.8 Idempotency: why "just retry it" can be dangerous
+
+An operation is **idempotent** if doing it once has the same effect as doing it
+five times. Reading a file is idempotent — reading it again doesn't change
+anything. Sending "please reject invoice X" to a government portal is *not*
+idempotent by default: send it twice by accident (because your program crashed
+right after sending it the first time and, not knowing whether the first send
+succeeded, tried again) and you may have rejected it twice, which can mean two
+different things happening depending on how the receiving system was built —
+in this project's case, silently trying to reject an already-rejected document
+a second time.
+
+The standard fix is an **idempotency key**: a token attached to the request
+that the receiving system remembers. If the same key arrives twice, the second
+arrival is recognised as *the same request being retried*, and the receiver
+replies "already done" instead of doing it again. The key detail this project
+gets right (and explicitly measured, Part 6.8): the key must be **derived from
+the content of the decision itself** (a hash of "this GSTIN, this period, this
+document, this action" — see 0.6) rather than a randomly generated token,
+because a retry of the *same* decision must produce the *same* key for the
+receiver to recognise it as a repeat. A random token would be different every
+time, defeating the whole mechanism at the exact moment it is needed.
+
+## 0.9 A cache, and what "content-addressed" means
+
+A **cache** stores the result of an expensive operation so that repeating the
+exact same operation later can return the stored result instantly instead of
+redoing the work. A **content-addressed** cache is one where the "address" you
+look a stored result up by is a hash (0.6) of the *entire input* — so asking
+the identical question, with the identical settings, will always find the
+identical stored answer, and asking a even slightly different question is
+guaranteed to be treated as a different question. This project caches every
+LLM call this way (Part 2.3, `llm/`), which is what makes an experiment
+reproducible from a clean checkout with no API key at all: the recorded answers
+replay from disk.
+
+## 0.10 Crash safety: at-least-once, at-most-once, exactly-once
+
+Real programs crash — the process is killed, the machine loses power, the
+network drops mid-request. The question "what happens to work that was
+in-flight when that happened?" has three possible honest answers, and knowing
+which one a system gives you is a big deal:
+
+- **At-most-once**: work in flight during a crash might never complete. Safe
+  from duplication, unsafe from silent loss.
+- **At-least-once**: the system guarantees the work eventually happens, by
+  retrying anything it cannot prove completed — which means it might run
+  *more* than once.
+- **Exactly-once**: the system guarantees the work happens precisely one time,
+  no matter how many crashes occur mid-way.
+
+True exactly-once execution of an arbitrary side effect is not actually
+achievable in general — the trick real systems use is to combine **at-least-
+once retry** (0.10) with an **idempotency key** (0.8), so that even though the
+underlying action might be *attempted* more than once, it only ever *takes
+effect* once. That combination is what this project calls "exactly-once
+submission," and it measured the claim directly by deliberately crashing a
+process mid-work and checking what happened on restart (Part 6.8) rather than
+asserting it from the design alone.
+
+A **durable workflow engine** (this project uses one called DBOS) is a library
+that automatically remembers which steps of a multi-step process have already
+completed, so that if the process is killed and restarted, it resumes from
+where it left off instead of starting over or forgetting what it had done.
+
+## 0.11 Automated tests, and why they run before every change
+
+A **test** is a small program that runs part of the real program and checks
+the result against what it should be, automatically, without a person
+watching. A **unit test** checks one small piece of logic in isolation. A
+**property-based test** (this project uses a library called Hypothesis for
+this) does not pick one fixed example to check — it generates hundreds of
+different, sometimes deliberately weird, inputs and checks that some general
+rule ("two invoice numbers judged equal must always produce the same
+normalised form") holds for all of them, which catches edge cases a human
+would never have thought to write down individually. **CI** (Continuous
+Integration) means a server automatically re-runs every test whenever code
+changes, so a change that breaks something is caught within minutes rather than
+discovered by a person weeks later. This project's whole test suite runs
+without needing a database, an API key, or a network connection, specifically
+so it can run in CI on every change at zero cost (Part 6, Part 8).
+
+## 0.12 A few smaller words, defined once
+
+**Decimal versus float.** Computers usually represent fractional numbers in a
+binary format (`float`) that cannot exactly represent most ordinary decimal
+fractions — famously, `0.1 + 0.2` computed this way does not equal `0.3`
+exactly. For money, where a rounding difference of one paisa can matter and
+must never appear out of nowhere, this project uses `Decimal` arithmetic
+instead, which represents numbers the way you'd write them on paper and does
+not introduce this error (Part 2.3, `domain/`).
+
+**Enum.** A variable that is only ever allowed to hold one of a small, fixed,
+named set of values — `ACCEPT`, `REJECT`, `PENDING`, and nothing else — rather
+than any arbitrary text. This project uses enums specifically to make certain
+mistakes impossible to represent in the first place, rather than merely
+unlikely (Part 3.3).
+
+**Confidence interval.** A single measured percentage — "the model got 92%
+right" — hides how much data it is based on. A confidence interval is a range
+around that number expressing how much the true value could plausibly differ
+from the measured one, given the sample size; a percentage measured on 12
+examples is far less certain than the same percentage measured on 2,000, and an
+interval makes that difference visible instead of hiding it behind a single
+clean-looking number (Part 3.7, Part 6).
 
 ---
 
@@ -795,43 +1051,157 @@ numbers.
 
 # Glossary
 
-**Agentic** — Software where a model chooses its own next action at runtime,
-rather than following a path the programmer fixed in advance.
+Every term below is explained again from zero — you should not need to have
+read the part that introduced it to understand the definition here.
 
-**DRC-01C** — The notice issued when claimed credit exceeds available credit by
-more than the Rule 88D threshold. Seven days to respond.
+**Agent** — A loop of code that repeatedly asks an LLM "what next?", and either
+receives a final answer or an instruction to call one specific, pre-approved
+tool; runs that tool as ordinary code; and feeds the result back in. The LLM
+never touches anything directly — see Part 0.4.
 
-**GSTIN** — The 15-character taxpayer identifier. Carries a check digit.
+**Agentic** — Describes software built around one or more agents: a model
+chooses its own next action at runtime from a fixed menu, rather than
+following a sequence the programmer wrote out in advance.
 
-**GSTR-1 / 2A / 2B / 3B** — Supplier's outward filing / live view / frozen
-monthly snapshot / your summary return.
+**API (Application Programming Interface)** — The agreed shape of the messages
+two programs send each other so each can understand the other without a human
+translating. See Part 0.1.
 
-**IMS** — Invoice Management System. Where you accept, reject, or defer each
-inward document. Silence counts as acceptance.
+**Cache, content-addressed** — A store of previously computed results, looked
+up by a hash of the entire input, so an identical request is guaranteed to
+find its previous answer and a different request is guaranteed not to. See
+Part 0.9.
 
-**IRN** — Invoice Reference Number, issued when an e-invoice is registered.
-Cancellable only within 24 hours.
+**CI (Continuous Integration)** — A server that automatically re-runs the test
+suite every time code changes, so a breakage is caught within minutes.
 
-**ITC** — Input Tax Credit. Tax paid on purchases, offset against tax collected
-on sales.
+**Confidence interval** — A range around a measured number expressing how much
+it could plausibly be wrong by, given how much data it was measured on. See
+also *Wilson interval*.
 
-**Idempotency key** — A token making a repeated request safe, so a retry cannot
-submit twice.
+**Decimal** — A way of representing fractional numbers that matches how they
+are written on paper, used here for every money amount instead of binary
+floating point, which cannot represent most decimal fractions exactly. See
+Part 0.12.
 
-**ReAct** — An agent loop alternating reasoning and tool calls, each informed by
-the last result.
+**Deterministic** — Produces the same output from the same input, every time,
+on any machine. The opposite of how an LLM behaves. See Part 0.5.
 
-**RCM** — Reverse charge. The buyer pays the tax directly rather than the
-supplier collecting it.
+**DRC-01C** — The notice issued when the tax credit you claim exceeds what
+GSTR-2B says is available, by more than the Rule 88D threshold. You get seven
+days to respond.
 
-**Section 16(4)** — The rule capping how late credit may be claimed: 30 November
-following the financial year.
+**Durable workflow** — A multi-step process managed by a library (this project
+uses one called DBOS) that remembers which steps already finished, so a crash
+mid-process resumes from where it left off instead of restarting or losing
+track. See Part 0.10.
 
-**Straight-through processing** — The share of cases decided with no human
-involvement.
+**Enum** — A variable restricted to one of a small, fixed, named set of values
+(`ACCEPT`, `REJECT`, `PENDING` and nothing else), used to make an invalid value
+impossible to represent rather than merely discouraged.
 
-**Wilson interval** — A confidence interval for a proportion that stays inside
-[0, 1] and holds its coverage at small samples.
+**Exactly-once** — A guarantee that an action takes effect precisely once no
+matter how many times the underlying process crashes or retries, usually built
+by combining at-least-once retry with an idempotency key rather than achieved
+directly. See Part 0.10.
+
+**GSTIN** — The 15-character number identifying a taxpayer under GST. The last
+character is a check digit, computed from the other 14, that catches most
+typing or transcription errors.
+
+**GSTR-1 / 2A / 2B / 3B** — Four different filings in the GST system: 1 is what
+your supplier says they sold you; 2A is a live, constantly-updating view built
+from suppliers' 1s; 2B is a frozen monthly snapshot of the same information —
+the one that legally determines your credit; 3B is your own summary return,
+where you actually claim it.
+
+**Hash / hash function** — A function that turns any input, of any size, into
+a short, fixed-length fingerprint such that the same input always produces the
+same fingerprint, a tiny change to the input produces a completely different
+one, and there is no practical way to reverse it. See Part 0.6.
+
+**Hash chain** — A sequence of records where each one includes the hash of the
+one before it, so that editing or deleting an old record breaks the chain in a
+way that is detectable by recomputing it. See Part 0.7.
+
+**HTTP** — The protocol a web browser uses to fetch a page, and the one this
+project's review-queue server and its calls to AI providers both use to send
+requests and receive responses.
+
+**Idempotent / idempotency key** — An idempotent operation has the same effect
+whether performed once or several times. An idempotency key is a token
+attached to a request so a system that receives it twice recognises the
+second arrival as a repeat rather than acting twice. In this project the key
+is a hash of the decision's own content, not a random token, so a retried
+request produces the identical key. See Part 0.8.
+
+**IMS (Invoice Management System)** — The part of the GST portal where you
+take exactly one action — accept, reject, or leave pending — on every inward
+document. Taking no action at all counts as accepting it.
+
+**IRN (Invoice Reference Number)** — The identifier issued when an e-invoice is
+registered with the government's registry. Cancellable only within 24 hours of
+issue.
+
+**ITC (Input Tax Credit)** — The tax you already paid on your own purchases,
+which you are allowed to subtract from the tax you owe on your sales, provided
+your supplier told the government they charged it.
+
+**JSON** — A text format for structured data — `{"key": "value"}` — readable by
+both humans and programs, used almost universally for API request and response
+bodies.
+
+**JSON schema** — A document specifying exactly what shape a piece of JSON must
+have (which fields are required, and what type each one must be), used here to
+tell an LLM precisely how its tool calls and final answers must be structured.
+
+**LLM (Large Language Model)** — A model trained to predict the next chunk of
+text given everything before it, used to generate answers one chunk at a time;
+fluent and confident-sounding regardless of whether the answer is correct. See
+Part 0.2.
+
+**Precedent** — A past exception the system resolved, kept only if a human
+confirmed the resolution was correct, and retrieved later when a similar new
+exception appears so the agent does not re-investigate from zero.
+
+**Property-based test** — A test that generates many varied, sometimes
+extreme, inputs automatically and checks that a general rule holds for all of
+them, rather than checking one fixed example. See Part 0.11.
+
+**Provider** — The company or program that actually answers an API request to
+an LLM — Google (serving Gemini), Groq (serving open models on fast custom
+hardware), or a local Ollama installation. Distinct from the *model* itself.
+
+**RCM (Reverse Charge Mechanism)** — An arrangement where the buyer, not the
+supplier, is responsible for paying the tax directly to the government.
+
+**ReAct** — The specific agent loop this project uses: alternating a reasoning
+step and a tool-call step, each informed by the result of the last. Short for
+"Reason and Act."
+
+**Section 16(4)** — The rule capping how late a tax credit may be claimed: no
+later than 30 November following the end of the financial year it belongs to.
+
+**Straight-through processing** — The share of cases a system resolves with no
+human involvement at all.
+
+**Temperature** — A setting controlling how much randomness an LLM injects
+into its word choices. Zero is meant to make it always pick the single most
+likely next word every time, though in practice this does not fully eliminate
+run-to-run variation. See Part 0.3.
+
+**Tool** — An ordinary function an agent is allowed to call, described to the
+LLM in plain English plus a JSON schema for its arguments. The LLM can only
+ever ask for a tool by name — it cannot execute arbitrary code itself.
+
+**Unit test** — A test that checks one small, specific piece of logic against
+one fixed expected result.
+
+**Wilson interval** — A particular way of calculating a confidence interval
+for a proportion (like "12 out of 12 resolved") that stays within the
+possible range of 0% to 100% and remains accurate even at small sample sizes,
+unlike the more common textbook formula, which can claim false certainty —
+literally a 0%-wide interval — from a handful of observations.
 
 ---
 
